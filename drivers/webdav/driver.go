@@ -83,6 +83,10 @@ func (d *WebDav) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 		_ = res.RawResponse.Body.Close()
 		if (res.StatusCode() == 302 || res.StatusCode() == 307 || res.StatusCode() == 308) && res.Header().Get("location") != "" {
 			url = res.Header().Get("location")
+		} else if res.StatusCode() == http.StatusOK {
+			// A normal WebDAV server returns the file itself with 200 rather
+			// than redirecting. The URL is already a usable direct link, so do
+			// not treat the successful response as a redirect failure.
 		} else {
 			return nil, fmt.Errorf("redirect failed, status: %d", res.StatusCode())
 		}
