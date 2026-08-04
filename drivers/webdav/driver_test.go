@@ -7,9 +7,12 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
+	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
+	"github.com/go-resty/resty/v2"
 )
 
 func TestGetMapsMissingPathToObjectNotFound(t *testing.T) {
@@ -39,6 +42,23 @@ func TestMakeDirAfterMissingWebDAVStat(t *testing.T) {
 	}
 	if got := mkcolCount.Load(); got != 1 {
 		t.Fatalf("expected one MKCOL request, got %d", got)
+	}
+}
+
+func TestLinkAcceptsSuccessfulWebDAVResponse(t *testing.T) {
+	base.NoRedirectClient = resty.New().SetRedirectPolicy(resty.NoRedirectPolicy())
+	d, cleanup := newTestDriver(t, func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodGet && r.URL.Path == "/file" {
+			w.WriteHeader(http.StatusOK)
+			return true
+		}
+		return false
+	})
+	defer cleanup()
+
+	_, err := d.Link(context.Background(), &model.Object{Path: "/file", Name: "file"}, model.LinkArgs{Redirect: true})
+	if err != nil {
+		t.Fatalf("Link rejected a successful WebDAV response: %v", err)
 	}
 }
 
