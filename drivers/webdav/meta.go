@@ -5,6 +5,8 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 )
 
+const defaultWebDAVAuthTicketTTL = 300
+
 type Addition struct {
 	Vendor   string `json:"vendor" type:"select" options:"sharepoint,other" default:"other"`
 	Address  string `json:"address" required:"true"`

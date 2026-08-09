@@ -29,6 +29,17 @@ func TestGetMapsMissingPathToObjectNotFound(t *testing.T) {
 	}
 }
 
+func TestGetAdditionNormalizesMissingTicketTTL(t *testing.T) {
+	d := &WebDav{}
+	addition, ok := d.GetAddition().(*Addition)
+	if !ok {
+		t.Fatalf("GetAddition returned %T, want *Addition", d.GetAddition())
+	}
+	if addition.WebDAVAuthTicketTTL != defaultWebDAVAuthTicketTTL {
+		t.Fatalf("ticket TTL = %d, want %d", addition.WebDAVAuthTicketTTL, defaultWebDAVAuthTicketTTL)
+	}
+}
+
 func TestMakeDirAfterMissingWebDAVStat(t *testing.T) {
 	var mkcolCount atomic.Int32
 	d, cleanup := newTestDriver(t, func(w http.ResponseWriter, r *http.Request) bool {
