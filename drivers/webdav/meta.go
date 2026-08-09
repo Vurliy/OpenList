@@ -18,7 +18,7 @@ type Addition struct {
 	WebDAVAuthEnabled     bool   `json:"webdav_auth_enabled" default:"false" help:"append signed tickets to direct WebDAV links"`
 	WebDAVAuthSecret      string `json:"webdav_auth_secret" type:"text" help:"shared HMAC secret for the external WebDAV auth service"`
 	WebDAVAuthAudience    string `json:"webdav_auth_audience" help:"ticket audience used to distinguish WebDAV services"`
-	WebDAVAuthTicketTTL   int    `json:"webdav_auth_ticket_ttl" default:"300" help:"ticket lifetime in seconds"`
+	WebDAVAuthTicketTTL   int    `json:"webdav_auth_ticket_ttl" type:"number" default:"300" required:"false" help:"ticket lifetime in seconds"`
 }
 
 var config = driver.Config{
