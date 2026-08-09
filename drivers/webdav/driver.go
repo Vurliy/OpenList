@@ -2,8 +2,10 @@ package webdav
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"sync"
@@ -17,6 +19,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/pkg/cron"
 	"github.com/OpenListTeam/OpenList/v4/pkg/gowebdav"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
+	"github.com/OpenListTeam/OpenList/v4/pkg/webdavauth"
 )
 
 type WebDav struct {
@@ -36,6 +39,14 @@ func (d *WebDav) GetAddition() driver.Additional {
 }
 
 func (d *WebDav) Init(ctx context.Context) error {
+	if d.WebDAVAuthEnabled {
+		if d.WebDAVAuthSecret == "" {
+			return errors.New("webdav auth is enabled but webdav_auth_secret is empty")
+		}
+		if d.WebDAVAuthTicketTTL <= 0 {
+			d.WebDAVAuthTicketTTL = 300
+		}
+	}
 	err := d.setClient()
 	if err == nil {
 		d.cron = cron.NewCron(time.Hour * 12)
@@ -88,6 +99,12 @@ func (d *WebDav) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 	if err != nil {
 		return nil, err
 	}
+	if args.Redirect && d.WebDAVAuthEnabled {
+		url, err = d.withWebDAVTicket(ctx, url, file.GetPath())
+		if err != nil {
+			return nil, err
+		}
+	}
 	if args.Redirect {
 		// get the url after redirect
 		req := base.NoRedirectClient.R()
@@ -112,6 +129,33 @@ func (d *WebDav) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 		URL:    url,
 		Header: header,
 	}, nil
+}
+
+func (d *WebDav) withWebDAVTicket(ctx context.Context, rawURL, remotePath string) (string, error) {
+	user, ok := ctx.Value(conf.UserKey).(*model.User)
+	if !ok || user == nil {
+		return "", errors.New("cannot issue webdav ticket without an authenticated OpenList user")
+	}
+	now := time.Now()
+	ticket, err := webdavauth.Issue(d.WebDAVAuthSecret, webdavauth.Ticket{
+		Audience:  d.WebDAVAuthAudience,
+		Path:      remotePath,
+		UserID:    user.ID,
+		Username:  user.Username,
+		IssuedAt:  now.Unix(),
+		ExpiresAt: now.Add(time.Duration(d.WebDAVAuthTicketTTL) * time.Second).Unix(),
+	})
+	if err != nil {
+		return "", err
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	query := u.Query()
+	query.Set(webdavauth.QueryParameter, ticket)
+	u.RawQuery = query.Encode()
+	return u.String(), nil
 }
 
 func (d *WebDav) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) error {
