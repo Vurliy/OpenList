@@ -4,14 +4,18 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
+	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
+	"github.com/OpenListTeam/OpenList/v4/pkg/webdavauth"
 	"github.com/go-resty/resty/v2"
 )
 
@@ -59,6 +63,34 @@ func TestLinkAcceptsSuccessfulWebDAVResponse(t *testing.T) {
 	_, err := d.Link(context.Background(), &model.Object{Path: "/file", Name: "file"}, model.LinkArgs{Redirect: true})
 	if err != nil {
 		t.Fatalf("Link rejected a successful WebDAV response: %v", err)
+	}
+}
+
+func TestWithWebDAVTicketBindsUserAndPath(t *testing.T) {
+	d := &WebDav{Addition: Addition{
+		WebDAVAuthEnabled:   true,
+		WebDAVAuthSecret:    "secret",
+		WebDAVAuthAudience:  "storage-1",
+		WebDAVAuthTicketTTL: 60,
+	}}
+	ctx := context.WithValue(context.Background(), conf.UserKey, &model.User{ID: 7, Username: "alice"})
+	got, err := d.withWebDAVTicket(ctx, "https://webdav.example/download/file.mp4?existing=1", "/download/file.mp4")
+	if err != nil {
+		t.Fatalf("withWebDAVTicket failed: %v", err)
+	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := webdavauth.VerifyAudience("secret", u.Query().Get(webdavauth.QueryParameter), "storage-1", time.Now())
+	if err != nil {
+		t.Fatalf("ticket verification failed: %v", err)
+	}
+	if ticket.Path != "/download/file.mp4" || ticket.UserID != 7 || ticket.Username != "alice" {
+		t.Fatalf("unexpected ticket claims: %+v", ticket)
+	}
+	if u.Query().Get("existing") != "1" {
+		t.Fatalf("existing query parameter was lost: %q", u.RawQuery)
 	}
 }
 
