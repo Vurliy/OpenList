@@ -35,6 +35,9 @@ func (d *WebDav) Config() driver.Config {
 }
 
 func (d *WebDav) GetAddition() driver.Additional {
+	if d.WebDAVAuthTicketTTL <= 0 {
+		d.WebDAVAuthTicketTTL = defaultWebDAVAuthTicketTTL
+	}
 	return &d.Addition
 }
 
@@ -44,7 +47,7 @@ func (d *WebDav) Init(ctx context.Context) error {
 			return errors.New("webdav auth is enabled but webdav_auth_secret is empty")
 		}
 		if d.WebDAVAuthTicketTTL <= 0 {
-			d.WebDAVAuthTicketTTL = 300
+			d.WebDAVAuthTicketTTL = defaultWebDAVAuthTicketTTL
 		}
 	}
 	err := d.setClient()
