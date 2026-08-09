@@ -11,7 +11,10 @@ type Addition struct {
 	Username string `json:"username" required:"true"`
 	Password string `json:"password" required:"true"`
 	driver.RootPath
-	TlsInsecureSkipVerify bool `json:"tls_insecure_skip_verify" default:"false"`
+	TlsInsecureSkipVerify bool   `json:"tls_insecure_skip_verify" default:"false"`
+	Thumbnail             bool   `json:"thumbnail" default:"false" help:"enable image and video thumbnails; requires HTTP Range support"`
+	ThumbCacheFolder      string `json:"thumb_cache_folder" help:"optional local thumbnail cache folder"`
+	VideoThumbPos         string `json:"video_thumb_pos" default:"20%" help:"video snapshot position in seconds or percentage"`
 }
 
 var config = driver.Config{

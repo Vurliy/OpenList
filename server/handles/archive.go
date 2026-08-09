@@ -347,7 +347,7 @@ func ArchiveProxy(c *gin.Context) {
 		common.ErrorPage(c, err, 500)
 		return
 	}
-	if canProxy(storage, filename) {
+	if canProxy(storage, filename, false) {
 		// TODO: Support external download proxy URL
 		link, file, err := fs.ArchiveDriverExtract(c.Request.Context(), archiveRawPath, model.ArchiveInnerArgs{
 			ArchiveArgs: model.ArchiveArgs{

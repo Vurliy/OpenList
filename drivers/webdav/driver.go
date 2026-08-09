@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
+	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
@@ -20,8 +22,9 @@ import (
 type WebDav struct {
 	model.Storage
 	Addition
-	client *gowebdav.Client
-	cron   *cron.Cron
+	client  *gowebdav.Client
+	cron    *cron.Cron
+	thumbMu sync.Mutex
 }
 
 func (d *WebDav) Config() driver.Config {
@@ -56,17 +59,31 @@ func (d *WebDav) List(ctx context.Context, dir model.Obj, args model.ListArgs) (
 		return nil, err
 	}
 	return utils.SliceConvert(files, func(src os.FileInfo) (model.Obj, error) {
-		return &model.Object{
+		obj := model.Obj(&model.Object{
 			Path:     path.Join(dir.GetPath(), src.Name()),
 			Name:     src.Name(),
 			Size:     src.Size(),
 			Modified: src.ModTime(),
 			IsFolder: src.IsDir(),
-		}, nil
+		})
+		if d.Thumbnail && !src.IsDir() && apiURL(ctx) != "" {
+			fileType := utils.GetFileType(src.Name())
+			if fileType == conf.IMAGE || fileType == conf.VIDEO {
+				virtualPath := path.Join(args.ReqPath, src.Name())
+				obj = &model.ObjThumb{
+					Object:    *obj.(*model.Object),
+					Thumbnail: model.Thumbnail{Thumbnail: thumbURL(ctx, virtualPath)},
+				}
+			}
+		}
+		return obj, nil
 	})
 }
 
 func (d *WebDav) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
+	if args.Type == "thumb" {
+		return d.thumbLink(ctx, file)
+	}
 	url, header, err := d.client.Link(file.GetPath())
 	if err != nil {
 		return nil, err
