@@ -25,7 +25,7 @@ func Down(c *gin.Context) {
 		common.ErrorPage(c, err, 500)
 		return
 	}
-	if common.ShouldProxy(storage, filename) {
+	if c.Query("type") == "thumb" || common.ShouldProxy(storage, filename) {
 		Proxy(c)
 		return
 	} else {
@@ -51,7 +51,7 @@ func Proxy(c *gin.Context) {
 		common.ErrorPage(c, err, 500)
 		return
 	}
-	if canProxy(storage, filename) {
+	if canProxy(storage, filename, c.Query("type") == "thumb") {
 		if _, ok := c.GetQuery("d"); !ok {
 			if url := common.GenerateDownProxyURL(storage.GetStorage(), rawPath); url != "" {
 				c.Redirect(302, url)
@@ -132,8 +132,8 @@ func proxy(c *gin.Context, link *model.Link, file model.Obj, proxyRange bool) {
 // 3. storage.WebProxy
 // 4. proxy_types
 // solution: text_file + shouldProxy()
-func canProxy(storage driver.Driver, filename string) bool {
-	if storage.Config().MustProxy() || storage.GetStorage().WebProxy || storage.GetStorage().WebdavProxyURL() {
+func canProxy(storage driver.Driver, filename string, force bool) bool {
+	if force || storage.Config().MustProxy() || storage.GetStorage().WebProxy || storage.GetStorage().WebdavProxyURL() {
 		return true
 	}
 	if utils.SliceContains(conf.SlicesMap[conf.ProxyTypes], utils.Ext(filename)) {

@@ -433,6 +433,25 @@ func (c *Client) ReadStreamRange(path string, offset, length int64) (io.ReadClos
 	return nil, newPathError("ReadStream", path, rs.StatusCode)
 }
 
+// SupportsRange reports whether the remote resource answers a byte-range
+// request with HTTP 206 Partial Content. It deliberately does not fall back
+// to reading and discarding a 200 response, because callers such as thumbnail
+// generation must never silently download the complete file.
+func (c *Client) SupportsRange(path string) (bool, error) {
+	rs, err := c.req(http.MethodGet, path, nil, func(r *http.Request) {
+		r.Header.Set("Range", "bytes=0-0")
+	})
+	if err != nil {
+		return false, newPathErrorErr("SupportsRange", path, err)
+	}
+	defer rs.Body.Close()
+
+	if rs.StatusCode != http.StatusPartialContent {
+		return false, nil
+	}
+	return strings.HasPrefix(rs.Header.Get("Content-Range"), "bytes 0-0/"), nil
+}
+
 // Write writes data to a given path
 func (c *Client) Write(path string, data []byte, _ os.FileMode) (err error) {
 	s, err := c.put(path, bytes.NewReader(data), nil)
