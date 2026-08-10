@@ -166,7 +166,7 @@ func (d *WebDav) withWebDAVTicket(ctx context.Context, rawURL string) (string, e
 	if err != nil {
 		return "", err
 	}
-	if err := d.writeWebDAVGrant(ticket, user, publicPath); err != nil {
+	if err := d.writeWebDAVGrant(ticket, user, publicPath, ""); err != nil {
 		return "", err
 	}
 	query := u.Query()
@@ -175,7 +175,7 @@ func (d *WebDav) withWebDAVTicket(ctx context.Context, rawURL string) (string, e
 	return u.String(), nil
 }
 
-func (d *WebDav) writeWebDAVGrant(ticket string, user *model.User, publicPath string) error {
+func (d *WebDav) writeWebDAVGrant(ticket string, user *model.User, publicPath, state string) error {
 	if d.authClient == nil {
 		return errors.New("webdav auth control client is not initialized")
 	}
@@ -186,7 +186,7 @@ func (d *WebDav) writeWebDAVGrant(ticket string, user *model.User, publicPath st
 	if claims.Path != publicPath {
 		return errors.New("webdav grant path does not match the public link")
 	}
-	grant := webdavauth.NewGrant(ticket, claims)
+	grant := webdavauth.NewGrant(ticket, claims, state)
 	grant.UserID = user.ID
 	grant.Username = user.Username
 	data, err := json.Marshal(grant)
@@ -202,6 +202,82 @@ func (d *WebDav) writeWebDAVGrant(ticket string, user *model.User, publicPath st
 		return fmt.Errorf("publish webdav grant: %w", err)
 	}
 	return nil
+}
+
+// AuthorizeWebDAVState binds a browser-generated WebDAV state to the
+// currently authenticated OpenList user. Apache will not exchange the
+// ticket until the state cookie and this grant match.
+func (d *WebDav) AuthorizeWebDAVState(ticket, state string, user *model.User) (string, error) {
+	if !d.WebDAVAuthEnabled {
+		return "", errors.New("webdav state authorization is disabled")
+	}
+	if state == "" {
+		return "", errors.New("webdav authorization state is empty")
+	}
+	claims, err := webdavauth.VerifyAudience(d.WebDAVAuthSecret, ticket, d.WebDAVAuthAudience, time.Now())
+	if err != nil {
+		return "", fmt.Errorf("verify webdav authorization ticket: %w", err)
+	}
+	if user == nil || user.IsGuest() || claims.UserID != user.ID || claims.Username != user.Username {
+		return "", errors.New("webdav authorization user mismatch")
+	}
+	if err := d.writeWebDAVGrant(ticket, user, claims.Path, state); err != nil {
+		return "", err
+	}
+	return d.webDAVExchangeURL(ticket, state)
+}
+
+// RevokeWebDAVUser publishes a revocation marker through the OpenList-only
+// WebDAV control credential. Apache reads this marker while validating its
+// own session files; OpenList never edits those session files directly.
+func (d *WebDav) RevokeWebDAVUser(user *model.User) error {
+	if !d.WebDAVAuthEnabled || user == nil || user.IsGuest() {
+		return nil
+	}
+	address, err := d.authRevocationAddress()
+	if err != nil {
+		return err
+	}
+	client, err := d.newControlClient(address)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(map[string]any{
+		"v":          1,
+		"uid":        user.ID,
+		"revoked_at": time.Now().Unix(),
+	})
+	if err != nil {
+		return err
+	}
+	name := fmt.Sprintf("user-%d.json", user.ID)
+	tmp := ".tmp-" + name
+	if err := client.Write(tmp, data, 0600); err != nil {
+		return fmt.Errorf("write WebDAV revocation marker: %w", err)
+	}
+	if err := client.Rename(tmp, name, true); err != nil {
+		return fmt.Errorf("publish WebDAV revocation marker: %w", err)
+	}
+	return nil
+}
+
+func (d *WebDav) webDAVExchangeURL(ticket, state string) (string, error) {
+	base, err := url.Parse(d.Address)
+	if err != nil {
+		return "", err
+	}
+	if base.Scheme == "" || base.Host == "" {
+		return "", errors.New("webdav address must include scheme and host")
+	}
+	base.Path = "/webdav-auth/exchange"
+	base.RawPath = ""
+	base.RawQuery = ""
+	base.Fragment = ""
+	query := base.Query()
+	query.Set(webdavauth.QueryParameter, ticket)
+	query.Set("state", state)
+	base.RawQuery = query.Encode()
+	return base.String(), nil
 }
 
 func (d *WebDav) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) error {

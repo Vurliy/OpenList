@@ -6,6 +6,7 @@ import (
 	"errors"
 	"image/png"
 
+	webdavdriver "github.com/OpenListTeam/OpenList/v4/drivers/webdav"
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/db"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
@@ -14,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/pquerna/otp/totp"
 	"gorm.io/gorm"
+	log "github.com/sirupsen/logrus"
 )
 
 type LoginReq struct {
@@ -202,6 +204,16 @@ func Verify2FA(c *gin.Context) {
 }
 
 func LogOut(c *gin.Context) {
+	user, _ := c.Request.Context().Value(conf.UserKey).(*model.User)
+	if user != nil && !user.IsGuest() {
+		for _, storage := range op.GetAllStorages() {
+			if driver, ok := storage.(*webdavdriver.WebDav); ok {
+				if err := driver.RevokeWebDAVUser(user); err != nil {
+					log.Warnf("failed to revoke WebDAV sessions for %s: %v", user.Username, err)
+				}
+			}
+		}
+	}
 	err := common.InvalidateToken(c.GetHeader("Authorization"))
 	if err != nil {
 		common.ErrorResp(c, err, 500)
