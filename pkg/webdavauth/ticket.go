@@ -19,6 +19,37 @@ const (
 	QueryParameter = "ticket"
 )
 
+// Grant is the short-lived authorization record written by OpenList to the
+// external WebDAV service before a direct link is returned. The ticket is
+// still HMAC-authenticated; the grant file provides the explicit OpenList ↔
+// WebDAV communication boundary and lets the WebDAV service reject tickets
+// that were never registered by OpenList.
+type Grant struct {
+	Version   int    `json:"v"`
+	Ticket    string `json:"ticket"`
+	Audience  string `json:"aud,omitempty"`
+	Path      string `json:"path"`
+	UserID    uint   `json:"uid"`
+	Username  string `json:"user"`
+	IssuedAt  int64  `json:"iat"`
+	ExpiresAt int64  `json:"exp"`
+	Nonce     string `json:"jti"`
+}
+
+func NewGrant(ticket string, claims Ticket) Grant {
+	return Grant{
+		Version:   claims.Version,
+		Ticket:    ticket,
+		Audience:  claims.Audience,
+		Path:      claims.Path,
+		UserID:    claims.UserID,
+		Username:  claims.Username,
+		IssuedAt:  claims.IssuedAt,
+		ExpiresAt: claims.ExpiresAt,
+		Nonce:     claims.Nonce,
+	}
+}
+
 type Ticket struct {
 	Version   int    `json:"v"`
 	Audience  string `json:"aud,omitempty"`

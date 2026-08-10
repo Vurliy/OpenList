@@ -2,6 +2,7 @@ package webdav
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
+	"github.com/OpenListTeam/OpenList/v4/pkg/gowebdav"
 	"github.com/OpenListTeam/OpenList/v4/pkg/webdavauth"
 	"github.com/go-resty/resty/v2"
 )
@@ -78,12 +80,26 @@ func TestLinkAcceptsSuccessfulWebDAVResponse(t *testing.T) {
 }
 
 func TestWithWebDAVTicketBindsUserAndPath(t *testing.T) {
+	var grantPayload map[string]any
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut && r.Method != "MOVE" {
+			t.Fatalf("grant request method = %s, want PUT or MOVE", r.Method)
+		}
+		if r.Method == http.MethodPut {
+			if err := json.NewDecoder(r.Body).Decode(&grantPayload); err != nil {
+				t.Fatalf("decode grant: %v", err)
+			}
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer control.Close()
+
 	d := &WebDav{Addition: Addition{
 		WebDAVAuthEnabled:   true,
 		WebDAVAuthSecret:    "secret",
 		WebDAVAuthAudience:  "storage-1",
 		WebDAVAuthTicketTTL: 60,
-	}}
+	}, authClient: gowebdav.NewClient(control.URL+"/webdav-auth/grants/", "", "")}
 	ctx := context.WithValue(context.Background(), conf.UserKey, &model.User{ID: 7, Username: "alice"})
 	got, err := d.withWebDAVTicket(ctx, "https://webdav.example/download/file.mp4?existing=1")
 	if err != nil {
@@ -102,6 +118,53 @@ func TestWithWebDAVTicketBindsUserAndPath(t *testing.T) {
 	}
 	if u.Query().Get("existing") != "1" {
 		t.Fatalf("existing query parameter was lost: %q", u.RawQuery)
+	}
+	if grantPayload["ticket"] != u.Query().Get(webdavauth.QueryParameter) {
+		t.Fatalf("grant did not register the issued ticket: %#v", grantPayload)
+	}
+}
+
+func TestTicketedLinkLeavesExchangeForTheClient(t *testing.T) {
+	var dataGets atomic.Int32
+	data := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			dataGets.Add(1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer data.Close()
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut && r.Method != "MOVE" {
+			t.Fatalf("grant request method = %s, want PUT or MOVE", r.Method)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer control.Close()
+
+	d := &WebDav{
+		Addition: Addition{
+			WebDAVAuthEnabled:   true,
+			WebDAVAuthSecret:    "secret",
+			WebDAVAuthAudience:  "storage-1",
+			WebDAVAuthTicketTTL: 60,
+		},
+		client:     gowebdav.NewClient(data.URL+"/download/", "", ""),
+		authClient: gowebdav.NewClient(control.URL+"/webdav-auth/grants/", "", ""),
+	}
+	ctx := context.WithValue(context.Background(), conf.UserKey, &model.User{ID: 7, Username: "alice"})
+	link, err := d.Link(ctx, &model.Object{Path: "/file", Name: "file"}, model.LinkArgs{Redirect: true})
+	if err != nil {
+		t.Fatalf("Link failed: %v", err)
+	}
+	if dataGets.Load() != 0 {
+		t.Fatalf("ticketed link was resolved by OpenList; got %d GETs", dataGets.Load())
+	}
+	u, err := url.Parse(link.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Query().Get(webdavauth.QueryParameter) == "" {
+		t.Fatalf("ticketed link did not contain a ticket: %q", link.URL)
 	}
 }
 

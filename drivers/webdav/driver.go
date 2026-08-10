@@ -2,6 +2,7 @@ package webdav
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -25,9 +26,10 @@ import (
 type WebDav struct {
 	model.Storage
 	Addition
-	client  *gowebdav.Client
-	cron    *cron.Cron
-	thumbMu sync.Mutex
+	client     *gowebdav.Client
+	authClient *gowebdav.Client
+	cron       *cron.Cron
+	thumbMu    sync.Mutex
 }
 
 func (d *WebDav) Config() driver.Config {
@@ -102,13 +104,14 @@ func (d *WebDav) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 	if err != nil {
 		return nil, err
 	}
-	if args.Redirect && d.WebDAVAuthEnabled {
+	ticketedDirectLink := args.Redirect && d.WebDAVAuthEnabled
+	if ticketedDirectLink {
 		url, err = d.withWebDAVTicket(ctx, url)
 		if err != nil {
 			return nil, err
 		}
 	}
-	if args.Redirect {
+	if args.Redirect && !ticketedDirectLink {
 		// get the url after redirect
 		req := base.NoRedirectClient.R()
 		req.Header = header
@@ -163,10 +166,42 @@ func (d *WebDav) withWebDAVTicket(ctx context.Context, rawURL string) (string, e
 	if err != nil {
 		return "", err
 	}
+	if err := d.writeWebDAVGrant(ticket, user, publicPath); err != nil {
+		return "", err
+	}
 	query := u.Query()
 	query.Set(webdavauth.QueryParameter, ticket)
 	u.RawQuery = query.Encode()
 	return u.String(), nil
+}
+
+func (d *WebDav) writeWebDAVGrant(ticket string, user *model.User, publicPath string) error {
+	if d.authClient == nil {
+		return errors.New("webdav auth control client is not initialized")
+	}
+	claims, err := webdavauth.VerifyAudience(d.WebDAVAuthSecret, ticket, d.WebDAVAuthAudience, time.Now())
+	if err != nil {
+		return fmt.Errorf("verify webdav grant before upload: %w", err)
+	}
+	if claims.Path != publicPath {
+		return errors.New("webdav grant path does not match the public link")
+	}
+	grant := webdavauth.NewGrant(ticket, claims)
+	grant.UserID = user.ID
+	grant.Username = user.Username
+	data, err := json.Marshal(grant)
+	if err != nil {
+		return fmt.Errorf("marshal webdav grant: %w", err)
+	}
+	finalName := grant.Nonce + ".json"
+	temporaryName := ".tmp-" + grant.Nonce + ".json"
+	if err := d.authClient.Write(temporaryName, data, 0600); err != nil {
+		return fmt.Errorf("write temporary webdav grant: %w", err)
+	}
+	if err := d.authClient.Rename(temporaryName, finalName, true); err != nil {
+		return fmt.Errorf("publish webdav grant: %w", err)
+	}
+	return nil
 }
 
 func (d *WebDav) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) error {
