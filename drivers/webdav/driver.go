@@ -103,7 +103,7 @@ func (d *WebDav) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 		return nil, err
 	}
 	if args.Redirect && d.WebDAVAuthEnabled {
-		url, err = d.withWebDAVTicket(ctx, url, file.GetPath())
+		url, err = d.withWebDAVTicket(ctx, url)
 		if err != nil {
 			return nil, err
 		}
@@ -134,24 +134,32 @@ func (d *WebDav) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 	}, nil
 }
 
-func (d *WebDav) withWebDAVTicket(ctx context.Context, rawURL, remotePath string) (string, error) {
+func (d *WebDav) withWebDAVTicket(ctx context.Context, rawURL string) (string, error) {
 	user, ok := ctx.Value(conf.UserKey).(*model.User)
 	if !ok || user == nil {
 		return "", errors.New("cannot issue webdav ticket without an authenticated OpenList user")
 	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	// The external WebDAV server authorizes its public URL path (for example
+	// /download/movie.mp4), not the provider-internal path (/movie.mp4).
+	// Signing file.GetPath() here would make a correctly signed ticket
+	// unusable whenever Apache exposes the storage through an Alias.
+	publicPath := u.Path
+	if publicPath == "" || publicPath[0] != '/' {
+		return "", errors.New("cannot issue webdav ticket without a public URL path")
+	}
 	now := time.Now()
 	ticket, err := webdavauth.Issue(d.WebDAVAuthSecret, webdavauth.Ticket{
 		Audience:  d.WebDAVAuthAudience,
-		Path:      remotePath,
+		Path:      publicPath,
 		UserID:    user.ID,
 		Username:  user.Username,
 		IssuedAt:  now.Unix(),
 		ExpiresAt: now.Add(time.Duration(d.WebDAVAuthTicketTTL) * time.Second).Unix(),
 	})
-	if err != nil {
-		return "", err
-	}
-	u, err := url.Parse(rawURL)
 	if err != nil {
 		return "", err
 	}

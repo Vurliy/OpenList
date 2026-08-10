@@ -85,7 +85,7 @@ func TestWithWebDAVTicketBindsUserAndPath(t *testing.T) {
 		WebDAVAuthTicketTTL: 60,
 	}}
 	ctx := context.WithValue(context.Background(), conf.UserKey, &model.User{ID: 7, Username: "alice"})
-	got, err := d.withWebDAVTicket(ctx, "https://webdav.example/download/file.mp4?existing=1", "/download/file.mp4")
+	got, err := d.withWebDAVTicket(ctx, "https://webdav.example/download/file.mp4?existing=1")
 	if err != nil {
 		t.Fatalf("withWebDAVTicket failed: %v", err)
 	}
