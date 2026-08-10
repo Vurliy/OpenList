@@ -34,9 +34,10 @@ type Grant struct {
 	IssuedAt  int64  `json:"iat"`
 	ExpiresAt int64  `json:"exp"`
 	Nonce     string `json:"jti"`
+	State     string `json:"state,omitempty"`
 }
 
-func NewGrant(ticket string, claims Ticket) Grant {
+func NewGrant(ticket string, claims Ticket, state string) Grant {
 	return Grant{
 		Version:   claims.Version,
 		Ticket:    ticket,
@@ -47,6 +48,7 @@ func NewGrant(ticket string, claims Ticket) Grant {
 		IssuedAt:  claims.IssuedAt,
 		ExpiresAt: claims.ExpiresAt,
 		Nonce:     claims.Nonce,
+		State:     state,
 	}
 }
 

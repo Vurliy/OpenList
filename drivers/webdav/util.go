@@ -50,31 +50,46 @@ func (d *WebDav) setClient() error {
 		if err != nil {
 			return err
 		}
-		authClient := gowebdav.NewClient(controlAddress, d.Username, d.Password)
-		authClient.SetTransport(&http.Transport{
-			Proxy:           http.ProxyFromEnvironment,
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: d.TlsInsecureSkipVerify},
-		})
-		controlJar, err := cookiejar.New(nil)
+		d.authClient, err = d.newControlClient(controlAddress)
 		if err != nil {
 			return err
 		}
-		authClient.SetJar(controlJar)
-		d.authClient = authClient
 	} else {
 		d.authClient = nil
 	}
 	return nil
 }
 
+func (d *WebDav) newControlClient(address string) (*gowebdav.Client, error) {
+	client := gowebdav.NewClient(address, d.Username, d.Password)
+	client.SetTransport(&http.Transport{
+		Proxy:           http.ProxyFromEnvironment,
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: d.TlsInsecureSkipVerify},
+	})
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, err
+	}
+	client.SetJar(jar)
+	return client, nil
+}
+
 func (d *WebDav) authControlAddress() (string, error) {
+	return d.controlAddress(defaultWebDAVAuthControlPath)
+}
+
+func (d *WebDav) authRevocationAddress() (string, error) {
+	return d.controlAddress(defaultWebDAVAuthRevocationPath)
+}
+
+func (d *WebDav) controlAddress(controlPath string) (string, error) {
 	base, err := url.Parse(d.Address)
 	if err != nil {
 		return "", err
 	}
-	control, err := url.Parse(defaultWebDAVAuthControlPath)
+	control, err := url.Parse(controlPath)
 	if err != nil || control.IsAbs() || control.Host != "" || !strings.HasPrefix(control.Path, "/") {
-		return "", fmt.Errorf("webdav auth control path is invalid: %q", defaultWebDAVAuthControlPath)
+		return "", fmt.Errorf("webdav auth control path is invalid: %q", controlPath)
 	}
 	// The data client may still have a legacy /download/ suffix in Address.
 	// The control client must always be rooted at the host, so deliberately

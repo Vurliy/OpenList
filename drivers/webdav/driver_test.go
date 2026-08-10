@@ -124,6 +124,54 @@ func TestWithWebDAVTicketBindsUserAndPath(t *testing.T) {
 	}
 }
 
+func TestAuthorizeWebDAVStateBindsUserAndReturnsExchangeURL(t *testing.T) {
+	var grantPayload map[string]any
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			if err := json.NewDecoder(r.Body).Decode(&grantPayload); err != nil {
+				t.Fatalf("decode grant: %v", err)
+			}
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer control.Close()
+
+	d := &WebDav{Addition: Addition{
+		Address:            "https://webdav.example/download/",
+		WebDAVAuthEnabled:  true,
+		WebDAVAuthSecret:   "secret",
+		WebDAVAuthAudience: "storage-1",
+	}, authClient: gowebdav.NewClient(control.URL+"/webdav-auth/grants/", "", "")}
+	ticket, err := webdavauth.Issue("secret", webdavauth.Ticket{
+		Audience:  "storage-1",
+		Path:      "/download/file.mp4",
+		UserID:    7,
+		Username:  "alice",
+		IssuedAt:  time.Now().Add(-time.Second).Unix(),
+		ExpiresAt: time.Now().Add(time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.AuthorizeWebDAVState(ticket, "state-123", &model.User{ID: 7, Username: "alice"})
+	if err != nil {
+		t.Fatalf("AuthorizeWebDAVState failed: %v", err)
+	}
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Path != "/webdav-auth/exchange" || parsed.Query().Get("state") != "state-123" {
+		t.Fatalf("unexpected exchange URL: %s", got)
+	}
+	if grantPayload["state"] != "state-123" {
+		t.Fatalf("grant state = %#v, want state-123", grantPayload["state"])
+	}
+	if _, err := d.AuthorizeWebDAVState(ticket, "state-123", &model.User{ID: 8, Username: "bob"}); err == nil {
+		t.Fatal("expected a user mismatch to be rejected")
+	}
+}
+
 func TestTicketedLinkLeavesExchangeForTheClient(t *testing.T) {
 	var dataGets atomic.Int32
 	data := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
