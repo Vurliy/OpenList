@@ -4,6 +4,7 @@ ARG USE_LOCAL_FRONTEND=false
 
 FROM alpine:edge AS builder
 LABEL stage=go-builder
+ARG USE_LOCAL_FRONTEND=false
 WORKDIR /app/
 RUN apk add --no-cache bash curl jq gcc git go musl-dev
 COPY go.mod go.sum ./
