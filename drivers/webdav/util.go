@@ -76,9 +76,9 @@ func (d *WebDav) authControlAddress() (string, error) {
 	if err != nil || control.IsAbs() || control.Host != "" || !strings.HasPrefix(control.Path, "/") {
 		return "", fmt.Errorf("webdav auth control path is invalid: %q", defaultWebDAVAuthControlPath)
 	}
-	if strings.Trim(base.Path, "/") != "" {
-		return "", fmt.Errorf("webdav auth requires an address without a path: %q", d.Address)
-	}
+	// The data client may still have a legacy /download/ suffix in Address.
+	// The control client must always be rooted at the host, so deliberately
+	// replace that data path with the fixed control path here.
 	base.Path = path.Join("/", control.Path) + "/"
 	base.RawPath = ""
 	base.RawQuery = ""
