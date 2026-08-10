@@ -6,6 +6,7 @@ import (
 )
 
 const defaultWebDAVAuthTicketTTL = 300
+const defaultWebDAVAuthControlPath = "/webdav-auth/grants/"
 
 type Addition struct {
 	Vendor   string `json:"vendor" type:"select" options:"sharepoint,other" default:"other"`
