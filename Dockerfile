@@ -1,5 +1,6 @@
 ### Default image is base. You can add other support by modifying BASE_IMAGE_TAG. The following parameters are supported: base (default), aria2, ffmpeg, aio
 ARG BASE_IMAGE_TAG=base
+ARG USE_LOCAL_FRONTEND=false
 
 FROM alpine:edge AS builder
 LABEL stage=go-builder
@@ -8,7 +9,7 @@ RUN apk add --no-cache bash curl jq gcc git go musl-dev
 COPY go.mod go.sum ./
 RUN go mod download
 COPY ./ ./
-RUN bash build.sh release docker
+RUN USE_LOCAL_FRONTEND="${USE_LOCAL_FRONTEND}" bash build.sh release docker
 
 FROM openlistteam/openlist-base-image:${BASE_IMAGE_TAG}
 LABEL MAINTAINER="OpenList"

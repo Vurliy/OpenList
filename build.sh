@@ -637,7 +637,15 @@ for arg in "$@"; do
 done
 
 if [ "$buildType" = "dev" ]; then
-  FetchWebRolling
+  if [ "${USE_LOCAL_FRONTEND:-false}" = "true" ]; then
+    test -f public/dist/index.html || {
+      echo "USE_LOCAL_FRONTEND=true requires public/dist/index.html" >&2
+      exit 1
+    }
+    echo "using local frontend from public/dist"
+  else
+    FetchWebRolling
+  fi
   if [ "$dockerType" = "docker" ]; then
     BuildDocker
   elif [ "$dockerType" = "docker-multiplatform" ]; then
@@ -648,10 +656,18 @@ if [ "$buildType" = "dev" ]; then
     BuildDev
   fi
 elif [ "$buildType" = "release" -o "$buildType" = "beta" ]; then
-  if [ "$buildType" = "beta" ]; then
-    FetchWebRolling
+  if [ "${USE_LOCAL_FRONTEND:-false}" = "true" ]; then
+    test -f public/dist/index.html || {
+      echo "USE_LOCAL_FRONTEND=true requires public/dist/index.html" >&2
+      exit 1
+    }
+    echo "using local frontend from public/dist"
   else
-    FetchWebRelease
+    if [ "$buildType" = "beta" ]; then
+      FetchWebRolling
+    else
+      FetchWebRelease
+    fi
   fi
   if [ "$dockerType" = "docker" ]; then
     BuildDocker
