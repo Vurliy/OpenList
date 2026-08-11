@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -81,11 +82,13 @@ func TestLinkAcceptsSuccessfulWebDAVResponse(t *testing.T) {
 
 func TestWithWebDAVTicketBindsUserAndPath(t *testing.T) {
 	var grantPayload map[string]any
+	var temporaryPath string
 	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut && r.Method != "MOVE" {
 			t.Fatalf("grant request method = %s, want PUT or MOVE", r.Method)
 		}
 		if r.Method == http.MethodPut {
+			temporaryPath = r.URL.Path
 			if err := json.NewDecoder(r.Body).Decode(&grantPayload); err != nil {
 				t.Fatalf("decode grant: %v", err)
 			}
@@ -121,6 +124,9 @@ func TestWithWebDAVTicketBindsUserAndPath(t *testing.T) {
 	}
 	if grantPayload["ticket"] != u.Query().Get(webdavauth.QueryParameter) {
 		t.Fatalf("grant did not register the issued ticket: %#v", grantPayload)
+	}
+	if strings.Contains(temporaryPath, "/.tmp-") {
+		t.Fatalf("grant temporary path uses Apache-hidden component: %q", temporaryPath)
 	}
 }
 

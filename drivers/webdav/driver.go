@@ -194,7 +194,10 @@ func (d *WebDav) writeWebDAVGrant(ticket string, user *model.User, publicPath, s
 		return fmt.Errorf("marshal webdav grant: %w", err)
 	}
 	finalName := grant.Nonce + ".json"
-	temporaryName := ".tmp-" + grant.Nonce + ".json"
+	// The Apache storage template denies every URL path containing a hidden
+	// component. Keep the upload temporary file non-hidden; it is still
+	// private to the OpenList control user and is atomically published by MOVE.
+	temporaryName := "tmp-" + grant.Nonce + ".json"
 	if err := d.authClient.Write(temporaryName, data, 0600); err != nil {
 		return fmt.Errorf("write temporary webdav grant: %w", err)
 	}
@@ -251,7 +254,9 @@ func (d *WebDav) RevokeWebDAVUser(user *model.User) error {
 		return err
 	}
 	name := fmt.Sprintf("user-%d.json", user.ID)
-	tmp := ".tmp-" + name
+	// Keep the temporary revocation marker outside Apache's hidden-path deny
+	// rule; the final marker is still published atomically with MOVE.
+	tmp := "tmp-" + name
 	if err := client.Write(tmp, data, 0600); err != nil {
 		return fmt.Errorf("write WebDAV revocation marker: %w", err)
 	}
