@@ -49,13 +49,6 @@ func (d *WebDav) thumbLink(ctx context.Context, file model.Obj) (*model.Link, er
 	if fileType != conf.IMAGE && fileType != conf.VIDEO {
 		return nil, errors.New("thumbnail is not supported for this file type")
 	}
-	if d.WebDAVAuthEnabled && d.WebDAVThumbnailPath != "" {
-		thumbnailURL, err := d.thumbnailURL(ctx, file.GetPath(), file.GetPath())
-		if err != nil {
-			return nil, err
-		}
-		return &model.Link{URL: thumbnailURL}, nil
-	}
 
 	d.thumbMu.Lock()
 	defer d.thumbMu.Unlock()

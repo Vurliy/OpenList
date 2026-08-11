@@ -8,7 +8,6 @@ import (
 const defaultWebDAVAuthTicketTTL = 300
 const defaultWebDAVAuthControlPath = "/webdav-auth/grants/"
 const defaultWebDAVAuthRevocationPath = "/webdav-auth/revocations/"
-const defaultWebDAVThumbnailPath = "/webdav-thumbs/"
 
 type Addition struct {
 	Vendor   string `json:"vendor" type:"select" options:"sharepoint,other" default:"other"`
@@ -20,7 +19,6 @@ type Addition struct {
 	Thumbnail             bool   `json:"thumbnail" default:"false" help:"enable image and video thumbnails; requires HTTP Range support"`
 	ThumbCacheFolder      string `json:"thumb_cache_folder" help:"optional local thumbnail cache folder"`
 	VideoThumbPos         string `json:"video_thumb_pos" default:"20%" help:"video snapshot position in seconds or percentage"`
-	WebDAVThumbnailPath   string `json:"webdav_thumbnail_path" default:"/webdav-thumbs/" help:"public WebDAV path for server-generated thumbnails"`
 	WebDAVAuthEnabled     bool   `json:"webdav_auth_enabled" default:"false" help:"append signed tickets to direct WebDAV links"`
 	WebDAVAuthSecret      string `json:"webdav_auth_secret" type:"text" help:"shared HMAC secret for the external WebDAV auth service"`
 	WebDAVAuthAudience    string `json:"webdav_auth_audience" help:"ticket audience used to distinguish WebDAV services"`
