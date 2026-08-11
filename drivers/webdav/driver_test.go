@@ -67,6 +67,59 @@ func TestGetFallsBackToPathWhenDisplayNameIsMissing(t *testing.T) {
 	}
 }
 
+func TestGetRetriesDirectoryStatWithTrailingSlash(t *testing.T) {
+	var requested []string
+	d, cleanup := newTestDriver(t, func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Path != "/directory" && r.URL.Path != "/directory/" {
+			return false
+		}
+		requested = append(requested, r.Method+" "+r.URL.Path)
+		if r.URL.Path == "/directory" && r.Method == "PROPFIND" {
+			// Match Apache's redirect followed by a client-side GET failure.
+			w.Header().Set("Location", "/directory/")
+			w.WriteHeader(http.StatusMovedPermanently)
+			return true
+		}
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return true
+		}
+		if r.Method != "PROPFIND" {
+			return false
+		}
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		w.WriteHeader(http.StatusMultiStatus)
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:">
+  <d:response>
+    <d:href>/directory/</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:resourcetype><d:collection/></d:resourcetype>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>`))
+		return true
+	})
+	defer cleanup()
+
+	obj, err := d.Get(context.Background(), "/directory")
+	if err != nil {
+		t.Fatalf("directory Get failed: %v", err)
+	}
+	if !obj.IsDir() {
+		t.Fatal("directory Get returned a file")
+	}
+	if got := obj.GetName(); got != "directory" {
+		t.Fatalf("object name = %q, want directory", got)
+	}
+	if len(requested) != 3 || requested[0] != "PROPFIND /directory" || requested[1] != "GET /directory/" || requested[2] != "PROPFIND /directory/" {
+		t.Fatalf("unexpected requests: %v", requested)
+	}
+}
+
 func TestGetAdditionNormalizesMissingTicketTTL(t *testing.T) {
 	d := &WebDav{}
 	addition, ok := d.GetAddition().(*Addition)
