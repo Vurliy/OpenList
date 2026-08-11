@@ -322,6 +322,13 @@ func (d *WebDav) Put(ctx context.Context, dstDir model.Obj, s model.FileStreamer
 func (d *WebDav) Get(ctx context.Context, _path string) (model.Obj, error) {
 	_path = path.Join(d.GetRootPath(), _path)
 	info, err := d.client.Stat(_path)
+	// Apache mod_dav_fs redirects a directory URL without a trailing slash.
+	// gowebdav's PROPFIND client does not retain the PROPFIND method while
+	// following that redirect, so the redirect can surface as a 404/3xx here.
+	// Retry the directory form explicitly, while keeping file paths unchanged.
+	if err != nil && _path != "/" && _path[len(_path)-1] != '/' && isDirectoryStatRedirect(err) {
+		info, err = d.client.Stat(_path + "/")
+	}
 	if err != nil {
 		if gowebdav.IsErrNotFound(err) {
 			return nil, errs.ObjectNotFound
@@ -344,6 +351,21 @@ func (d *WebDav) Get(ctx context.Context, _path string) (model.Obj, error) {
 		IsFolder: info.IsDir(),
 		Path:     _path,
 	}, nil
+}
+
+func isDirectoryStatRedirect(err error) bool {
+	for _, status := range []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+		http.StatusNotFound,
+	} {
+		if gowebdav.IsErrCode(err, status) {
+			return true
+		}
+	}
+	return false
 }
 
 var _ driver.Driver = (*WebDav)(nil)
