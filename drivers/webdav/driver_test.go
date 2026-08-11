@@ -43,6 +43,27 @@ func TestGetAdditionNormalizesMissingTicketTTL(t *testing.T) {
 	}
 }
 
+func TestWebDAVThumbnailURLMirrorsSourcePath(t *testing.T) {
+	d := &WebDav{Addition: Addition{
+		Address:             "https://webdav.example/download/",
+		WebDAVThumbnailPath: "/webdav-thumbs/",
+	}}
+	got, err := d.webDAVThumbnailURL("/folder/海边 photo.mp4")
+	if err != nil {
+		t.Fatalf("webDAVThumbnailURL failed: %v", err)
+	}
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.EscapedPath() != "/webdav-thumbs/folder/%E6%B5%B7%E8%BE%B9%20photo.mp4.jpg" {
+		t.Fatalf("thumbnail path = %q", parsed.EscapedPath())
+	}
+	if parsed.RawQuery != "" {
+		t.Fatalf("thumbnail URL unexpectedly has query: %q", parsed.RawQuery)
+	}
+}
+
 func TestMakeDirAfterMissingWebDAVStat(t *testing.T) {
 	var mkcolCount atomic.Int32
 	d, cleanup := newTestDriver(t, func(w http.ResponseWriter, r *http.Request) bool {

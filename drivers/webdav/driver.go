@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +40,9 @@ func (d *WebDav) Config() driver.Config {
 func (d *WebDav) GetAddition() driver.Additional {
 	if d.WebDAVAuthTicketTTL <= 0 {
 		d.WebDAVAuthTicketTTL = defaultWebDAVAuthTicketTTL
+	}
+	if d.WebDAVThumbnailPath == "" {
+		d.WebDAVThumbnailPath = defaultWebDAVThumbnailPath
 	}
 	return &d.Addition
 }
@@ -85,10 +89,15 @@ func (d *WebDav) List(ctx context.Context, dir model.Obj, args model.ListArgs) (
 		if d.Thumbnail && !src.IsDir() && apiURL(ctx) != "" {
 			fileType := utils.GetFileType(src.Name())
 			if fileType == conf.IMAGE || fileType == conf.VIDEO {
+				storagePath := path.Join(dir.GetPath(), src.Name())
 				virtualPath := path.Join(args.ReqPath, src.Name())
+				thumbnail, err := d.thumbnailURL(ctx, storagePath, virtualPath)
+				if err != nil {
+					return nil, err
+				}
 				obj = &model.ObjThumb{
 					Object:    *obj.(*model.Object),
-					Thumbnail: model.Thumbnail{Thumbnail: thumbURL(ctx, virtualPath)},
+					Thumbnail: model.Thumbnail{Thumbnail: thumbnail},
 				}
 			}
 		}
@@ -135,6 +144,39 @@ func (d *WebDav) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 		URL:    url,
 		Header: header,
 	}, nil
+}
+
+// thumbnailURL returns a direct WebDAV thumbnail URL when the external
+// service is configured. The ticket is registered while the directory is
+// listed, so the browser can follow the URL directly without routing image
+// bytes through OpenList. The WebDAV service queues generation on the first
+// authorized request when the output is not ready yet.
+func (d *WebDav) thumbnailURL(ctx context.Context, storagePath, fallbackPath string) (string, error) {
+	if !d.WebDAVAuthEnabled || d.WebDAVThumbnailPath == "" {
+		return thumbURL(ctx, fallbackPath), nil
+	}
+	rawURL, err := d.webDAVThumbnailURL(storagePath)
+	if err != nil {
+		return "", err
+	}
+	return d.withWebDAVTicket(ctx, rawURL)
+}
+
+func (d *WebDav) webDAVThumbnailURL(storagePath string) (string, error) {
+	base, err := url.Parse(d.Address)
+	if err != nil {
+		return "", err
+	}
+	if base.Scheme == "" || base.Host == "" {
+		return "", errors.New("webdav address must include scheme and host")
+	}
+	thumbnailPath := strings.TrimSuffix(d.WebDAVThumbnailPath, "/")
+	thumbnailPath = path.Join("/", thumbnailPath, strings.TrimPrefix(storagePath, "/")+webDAVThumbExt)
+	base.Path = thumbnailPath
+	base.RawPath = ""
+	base.RawQuery = ""
+	base.Fragment = ""
+	return base.String(), nil
 }
 
 func (d *WebDav) withWebDAVTicket(ctx context.Context, rawURL string) (string, error) {
