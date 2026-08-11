@@ -32,6 +32,41 @@ func TestGetMapsMissingPathToObjectNotFound(t *testing.T) {
 	}
 }
 
+func TestGetFallsBackToPathWhenDisplayNameIsMissing(t *testing.T) {
+	d, cleanup := newTestDriver(t, func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method != "PROPFIND" || r.URL.Path != "/missing-displayname.mp4" {
+			return false
+		}
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		w.WriteHeader(http.StatusMultiStatus)
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:">
+  <d:response>
+    <d:href>/missing-displayname.mp4</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:displayname></d:displayname>
+        <d:getcontentlength>1</d:getcontentlength>
+        <d:getlastmodified>Tue, 11 Aug 2026 09:00:00 GMT</d:getlastmodified>
+        <d:resourcetype></d:resourcetype>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>`))
+		return true
+	})
+	defer cleanup()
+
+	obj, err := d.Get(context.Background(), "/missing-displayname.mp4")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if got := obj.GetName(); got != "missing-displayname.mp4" {
+		t.Fatalf("object name = %q, want path basename", got)
+	}
+}
+
 func TestGetAdditionNormalizesMissingTicketTTL(t *testing.T) {
 	d := &WebDav{}
 	addition, ok := d.GetAddition().(*Addition)
