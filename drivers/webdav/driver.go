@@ -329,8 +329,16 @@ func (d *WebDav) Get(ctx context.Context, _path string) (model.Obj, error) {
 		return nil, err
 	}
 
+	name := info.Name()
+	// Some WebDAV servers (including Apache mod_dav_fs in our deployment)
+	// omit DAV:displayname. Keep the object usable by deriving the name from
+	// the requested path; the API uses it to classify video/image files.
+	if name == "" && _path != "/" {
+		name = path.Base(_path)
+	}
+
 	return &model.Object{
-		Name:     info.Name(),
+		Name:     name,
 		Size:     info.Size(),
 		Modified: info.ModTime(),
 		IsFolder: info.IsDir(),
