@@ -50,3 +50,33 @@ func AuthorizeWebDAV(c *gin.Context) {
 	}
 	common.ErrorResp(c, lastErr, 401)
 }
+
+// RevokeWebDAV invalidates every WebDAV browser session belonging to the
+// current OpenList account. The revocation is published through each
+// WebDAV storage's control credential; Apache remains the owner of its
+// session files and applies the marker on the next request.
+func RevokeWebDAV(c *gin.Context) {
+	user, ok := c.Request.Context().Value(conf.UserKey).(*model.User)
+	if !ok || user == nil || user.IsGuest() {
+		common.ErrorStrResp(c, "OpenList login is required to revoke WebDAV sessions", 401)
+		return
+	}
+
+	configured := false
+	var lastErr error
+	for _, storage := range op.GetAllStorages() {
+		driver, ok := storage.(*webdavdriver.WebDav)
+		if !ok || !driver.WebDAVAuthEnabled {
+			continue
+		}
+		configured = true
+		if err := driver.RevokeWebDAVUser(user); err != nil {
+			lastErr = err
+		}
+	}
+	if lastErr != nil {
+		common.ErrorResp(c, lastErr, 500)
+		return
+	}
+	common.SuccessResp(c, gin.H{"configured": configured})
+}
