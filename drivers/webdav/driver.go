@@ -82,7 +82,13 @@ func (d *WebDav) List(ctx context.Context, dir model.Obj, args model.ListArgs) (
 			Modified: src.ModTime(),
 			IsFolder: src.IsDir(),
 		})
-		if d.Thumbnail && !src.IsDir() && apiURL(ctx) != "" {
+		// The current WebDAV ticket flow protects direct media links, but the
+		// OpenList-side thumbnail renderer does not yet participate in that
+		// browser authorization flow. Do not publish /d/...?...type=thumb URLs
+		// for an authenticated WebDAV storage; those requests would reach the
+		// provider without a ticket and only produce noisy 500 responses. The
+		// server-side thumbnail task will re-enable this path later.
+		if d.Thumbnail && !d.WebDAVAuthEnabled && !src.IsDir() && apiURL(ctx) != "" {
 			fileType := utils.GetFileType(src.Name())
 			if fileType == conf.IMAGE || fileType == conf.VIDEO {
 				virtualPath := path.Join(args.ReqPath, src.Name())
