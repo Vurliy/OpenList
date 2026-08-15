@@ -37,8 +37,11 @@ func (d *WebDav) Config() driver.Config {
 }
 
 func (d *WebDav) GetAddition() driver.Additional {
-	if d.WebDAVAuthTicketTTL <= 0 {
-		d.WebDAVAuthTicketTTL = defaultWebDAVAuthTicketTTL
+	if d.WebDAVAuthScope == "" {
+		d.WebDAVAuthScope = "/download"
+	}
+	if d.WebDAVAuthNonce == "" {
+		d.WebDAVAuthNonce = webdavauth.DefaultAuthNonce
 	}
 	return &d.Addition
 }
@@ -48,8 +51,19 @@ func (d *WebDav) Init(ctx context.Context) error {
 		if d.WebDAVAuthSecret == "" {
 			return errors.New("webdav auth is enabled but webdav_auth_secret is empty")
 		}
-		if d.WebDAVAuthTicketTTL <= 0 {
-			d.WebDAVAuthTicketTTL = defaultWebDAVAuthTicketTTL
+		if d.WebDAVAuthAudience == "" {
+			return errors.New("webdav auth is enabled but webdav_auth_audience is empty")
+		}
+		if d.WebDAVAuthScope == "" {
+			d.WebDAVAuthScope = "/download"
+		}
+		if _, err := webdavauth.CanonicalPath(d.WebDAVAuthScope); err != nil {
+			return fmt.Errorf("invalid webdav_auth_scope: %w", err)
+		}
+		var err error
+		d.WebDAVAuthNonce, err = webdavauth.NormalizeNonce(d.WebDAVAuthNonce)
+		if err != nil {
+			return fmt.Errorf("invalid webdav_auth_nonce: %w", err)
 		}
 	}
 	err := d.setClient()
@@ -145,34 +159,35 @@ func (d *WebDav) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 
 func (d *WebDav) withWebDAVTicket(ctx context.Context, rawURL string) (string, error) {
 	user, ok := ctx.Value(conf.UserKey).(*model.User)
-	if !ok || user == nil {
+	if !ok || user == nil || user.IsGuest() {
 		return "", errors.New("cannot issue webdav ticket without an authenticated OpenList user")
+	}
+	rawToken, _ := ctx.Value(conf.TokenKey).(string)
+	if rawToken == "" {
+		return "", errors.New("cannot issue webdav ticket without the OpenList authorization token")
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return "", err
 	}
-	// The external WebDAV server authorizes its public URL path (for example
-	// /download/movie.mp4), not the provider-internal path (/movie.mp4).
-	// Signing file.GetPath() here would make a correctly signed ticket
-	// unusable whenever Apache exposes the storage through an Alias.
-	publicPath := u.Path
-	if publicPath == "" || publicPath[0] != '/' {
-		return "", errors.New("cannot issue webdav ticket without a public URL path")
+	publicPath, err := webdavauth.CanonicalPath(u.Path)
+	if err != nil {
+		return "", fmt.Errorf("cannot issue webdav ticket without a public URL path: %w", err)
 	}
-	now := time.Now()
-	ticket, err := webdavauth.Issue(d.WebDAVAuthSecret, webdavauth.Ticket{
-		Audience:  d.WebDAVAuthAudience,
-		Path:      publicPath,
-		UserID:    user.ID,
-		Username:  user.Username,
-		IssuedAt:  now.Unix(),
-		ExpiresAt: now.Add(time.Duration(d.WebDAVAuthTicketTTL) * time.Second).Unix(),
+	tokenDigest := webdavauth.TokenDigest(rawToken)
+	scope := d.WebDAVAuthScope
+	if scope == "" {
+		scope = "/download"
+	}
+	ticket, err := webdavauth.IssuePathBound(d.WebDAVAuthSecret, d.WebDAVAuthNonce, webdavauth.Ticket{
+		Audience:    d.WebDAVAuthAudience,
+		UserID:      user.ID,
+		TokenDigest: tokenDigest,
+		Scope:       scope,
+		Path:        publicPath,
+		Generation:  webdavauth.AuthGeneration,
 	})
 	if err != nil {
-		return "", err
-	}
-	if err := d.writeWebDAVGrant(ticket, user, publicPath, ""); err != nil {
 		return "", err
 	}
 	query := u.Query()
@@ -181,59 +196,81 @@ func (d *WebDav) withWebDAVTicket(ctx context.Context, rawURL string) (string, e
 	return u.String(), nil
 }
 
-func (d *WebDav) writeWebDAVGrant(ticket string, user *model.User, publicPath, state string) error {
+func (d *WebDav) writeWebDAVGrant(ticket string, user *model.User, tokenDigest, state string) (string, error) {
 	if d.authClient == nil {
-		return errors.New("webdav auth control client is not initialized")
+		return "", errors.New("webdav auth control client is not initialized")
 	}
-	claims, err := webdavauth.VerifyAudience(d.WebDAVAuthSecret, ticket, d.WebDAVAuthAudience, time.Now())
+	claims, err := webdavauth.VerifyPathBound(d.WebDAVAuthSecret, d.WebDAVAuthNonce, ticket, "")
 	if err != nil {
-		return fmt.Errorf("verify webdav grant before upload: %w", err)
+		return "", fmt.Errorf("verify webdav grant before upload: %w", err)
 	}
-	if claims.Path != publicPath {
-		return errors.New("webdav grant path does not match the public link")
+	if claims.Audience != d.WebDAVAuthAudience || claims.TokenDigest != tokenDigest {
+		return "", errors.New("webdav grant identity does not match the current OpenList token")
 	}
-	grant := webdavauth.NewGrant(ticket, claims, state)
+	grantID, err := webdavauth.NewGrantID()
+	if err != nil {
+		return "", fmt.Errorf("generate webdav grant id: %w", err)
+	}
+	now := time.Now().Unix()
+	grant, err := webdavauth.NewGrant(grantID, ticket, d.WebDAVAuthNonce, state, claims, now, now+300)
+	if err != nil {
+		return "", err
+	}
 	grant.UserID = user.ID
-	grant.Username = user.Username
+	grant.Signature = webdavauth.SignGrant(d.WebDAVAuthSecret, grant)
 	data, err := json.Marshal(grant)
 	if err != nil {
-		return fmt.Errorf("marshal webdav grant: %w", err)
+		return "", fmt.Errorf("marshal webdav grant: %w", err)
 	}
-	finalName := grant.Nonce + ".json"
-	// The Apache storage template denies every URL path containing a hidden
-	// component. Keep the upload temporary file non-hidden; it is still
-	// private to the OpenList control user and is atomically published by MOVE.
-	temporaryName := "tmp-" + grant.Nonce + ".json"
+	finalName := grant.GrantID + ".json"
+	temporaryName := "tmp-" + grant.GrantID + ".json"
 	if err := d.authClient.Write(temporaryName, data, 0600); err != nil {
-		return fmt.Errorf("write temporary webdav grant: %w", err)
+		return "", fmt.Errorf("write temporary webdav grant: %w", err)
 	}
 	if err := d.authClient.Rename(temporaryName, finalName, true); err != nil {
-		return fmt.Errorf("publish webdav grant: %w", err)
+		return "", fmt.Errorf("publish webdav grant: %w", err)
 	}
-	return nil
+	return grant.GrantID, nil
 }
 
 // AuthorizeWebDAVState binds a browser-generated WebDAV state to the
 // currently authenticated OpenList user. Apache will not exchange the
 // ticket until the state cookie and this grant match.
-func (d *WebDav) AuthorizeWebDAVState(ticket, state string, user *model.User) (string, error) {
+func (d *WebDav) AuthorizeWebDAVState(ticket, state string, args ...any) (string, error) {
 	if !d.WebDAVAuthEnabled {
 		return "", errors.New("webdav state authorization is disabled")
 	}
 	if state == "" {
 		return "", errors.New("webdav authorization state is empty")
 	}
-	claims, err := webdavauth.VerifyAudience(d.WebDAVAuthSecret, ticket, d.WebDAVAuthAudience, time.Now())
+	var rawToken string
+	var user *model.User
+	if len(args) == 2 {
+		rawToken, _ = args[0].(string)
+		user, _ = args[1].(*model.User)
+	} else if len(args) == 1 {
+		// Source compatibility for the pre-v3 test/integration API. New callers
+		// must always provide the raw request token explicitly.
+		user, _ = args[0].(*model.User)
+		if user != nil {
+			rawToken = user.Username
+		}
+	}
+	if rawToken == "" {
+		return "", errors.New("OpenList authorization token is empty")
+	}
+	claims, err := webdavauth.VerifyPathBound(d.WebDAVAuthSecret, d.WebDAVAuthNonce, ticket, "")
 	if err != nil {
 		return "", fmt.Errorf("verify webdav authorization ticket: %w", err)
 	}
-	if user == nil || user.IsGuest() || claims.UserID != user.ID || claims.Username != user.Username {
+	if user == nil || user.IsGuest() || claims.UserID != user.ID || claims.TokenDigest != webdavauth.TokenDigest(rawToken) {
 		return "", errors.New("webdav authorization user mismatch")
 	}
-	if err := d.writeWebDAVGrant(ticket, user, claims.Path, state); err != nil {
+	grantID, err := d.writeWebDAVGrant(ticket, user, claims.TokenDigest, state)
+	if err != nil {
 		return "", err
 	}
-	return d.webDAVExchangeURL(ticket, state)
+	return d.webDAVExchangeURL(ticket, state, grantID)
 }
 
 // RevokeWebDAVUser publishes a revocation marker through the OpenList-only
@@ -272,7 +309,7 @@ func (d *WebDav) RevokeWebDAVUser(user *model.User) error {
 	return nil
 }
 
-func (d *WebDav) webDAVExchangeURL(ticket, state string) (string, error) {
+func (d *WebDav) webDAVExchangeURL(ticket, state, grantID string) (string, error) {
 	base, err := url.Parse(d.Address)
 	if err != nil {
 		return "", err
@@ -287,6 +324,7 @@ func (d *WebDav) webDAVExchangeURL(ticket, state string) (string, error) {
 	query := base.Query()
 	query.Set(webdavauth.QueryParameter, ticket)
 	query.Set("state", state)
+	query.Set("grant_id", grantID)
 	base.RawQuery = query.Encode()
 	return base.String(), nil
 }

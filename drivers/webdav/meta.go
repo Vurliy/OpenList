@@ -5,7 +5,6 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 )
 
-const defaultWebDAVAuthTicketTTL = 300
 const defaultWebDAVAuthControlPath = "/webdav-auth/grants/"
 const defaultWebDAVAuthRevocationPath = "/webdav-auth/revocations/"
 
@@ -22,7 +21,8 @@ type Addition struct {
 	WebDAVAuthEnabled     bool   `json:"webdav_auth_enabled" default:"false" help:"append signed tickets to direct WebDAV links"`
 	WebDAVAuthSecret      string `json:"webdav_auth_secret" type:"text" help:"shared HMAC secret for the external WebDAV auth service"`
 	WebDAVAuthAudience    string `json:"webdav_auth_audience" help:"ticket audience used to distinguish WebDAV services"`
-	WebDAVAuthTicketTTL   int    `json:"webdav_auth_ticket_ttl" type:"number" default:"300" required:"false" help:"ticket lifetime in seconds"`
+	WebDAVAuthScope       string `json:"webdav_auth_scope" default:"/download" help:"public WebDAV path scope for browser links"`
+	WebDAVAuthNonce       string `json:"webdav_auth_nonce" type:"text" help:"base64url nonce shared with the WebDAV ticket verifier"`
 }
 
 var config = driver.Config{

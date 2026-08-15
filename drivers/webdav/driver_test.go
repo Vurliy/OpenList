@@ -6,10 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
@@ -120,14 +118,14 @@ func TestGetRetriesDirectoryStatWithTrailingSlash(t *testing.T) {
 	}
 }
 
-func TestGetAdditionNormalizesMissingTicketTTL(t *testing.T) {
+func TestGetAdditionNormalizesWebDAVAuthDefaults(t *testing.T) {
 	d := &WebDav{}
 	addition, ok := d.GetAddition().(*Addition)
 	if !ok {
 		t.Fatalf("GetAddition returned %T, want *Addition", d.GetAddition())
 	}
-	if addition.WebDAVAuthTicketTTL != defaultWebDAVAuthTicketTTL {
-		t.Fatalf("ticket TTL = %d, want %d", addition.WebDAVAuthTicketTTL, defaultWebDAVAuthTicketTTL)
+	if addition.WebDAVAuthScope != "/download" || addition.WebDAVAuthNonce != webdavauth.DefaultAuthNonce {
+		t.Fatalf("unexpected defaults: scope=%q nonce=%q", addition.WebDAVAuthScope, addition.WebDAVAuthNonce)
 	}
 }
 
@@ -168,53 +166,45 @@ func TestLinkAcceptsSuccessfulWebDAVResponse(t *testing.T) {
 	}
 }
 
-func TestWithWebDAVTicketBindsUserAndPath(t *testing.T) {
-	var grantPayload map[string]any
-	var temporaryPath string
+func TestWithWebDAVTicketIsStableAndDoesNotCreateGrant(t *testing.T) {
+	var requests atomic.Int32
 	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPut && r.Method != "MOVE" {
-			t.Fatalf("grant request method = %s, want PUT or MOVE", r.Method)
-		}
-		if r.Method == http.MethodPut {
-			temporaryPath = r.URL.Path
-			if err := json.NewDecoder(r.Body).Decode(&grantPayload); err != nil {
-				t.Fatalf("decode grant: %v", err)
-			}
-		}
+		requests.Add(1)
 		w.WriteHeader(http.StatusCreated)
 	}))
 	defer control.Close()
 
 	d := &WebDav{Addition: Addition{
-		WebDAVAuthEnabled:   true,
-		WebDAVAuthSecret:    "secret",
-		WebDAVAuthAudience:  "storage-1",
-		WebDAVAuthTicketTTL: 60,
+		WebDAVAuthEnabled:  true,
+		WebDAVAuthSecret:   "secret",
+		WebDAVAuthAudience: "storage-1",
 	}, authClient: gowebdav.NewClient(control.URL+"/webdav-auth/grants/", "", "")}
 	ctx := context.WithValue(context.Background(), conf.UserKey, &model.User{ID: 7, Username: "alice"})
-	got, err := d.withWebDAVTicket(ctx, "https://webdav.example/download/file.mp4?existing=1")
+	ctx = context.WithValue(ctx, conf.TokenKey, "jwt-a")
+	one, err := d.withWebDAVTicket(ctx, "https://webdav.example/download/file.mp4?existing=1")
 	if err != nil {
 		t.Fatalf("withWebDAVTicket failed: %v", err)
 	}
-	u, err := url.Parse(got)
+	two, err := d.withWebDAVTicket(ctx, "https://webdav.example/download/file.mp4?existing=1")
+	if err != nil || one != two {
+		t.Fatalf("same file ticket changed: %q / %q / %v", one, two, err)
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("Link path unexpectedly created a grant: %d requests", requests.Load())
+	}
+	u, err := url.Parse(one)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ticket, err := webdavauth.VerifyAudience("secret", u.Query().Get(webdavauth.QueryParameter), "storage-1", time.Now())
+	ticket, err := webdavauth.VerifyPathBound("secret", d.WebDAVAuthNonce, u.Query().Get(webdavauth.QueryParameter), "/download/file.mp4")
 	if err != nil {
 		t.Fatalf("ticket verification failed: %v", err)
 	}
-	if ticket.Path != "/download/file.mp4" || ticket.UserID != 7 || ticket.Username != "alice" {
+	if ticket.Path != "/download/file.mp4" || ticket.UserID != 7 || ticket.TokenDigest != webdavauth.TokenDigest("jwt-a") {
 		t.Fatalf("unexpected ticket claims: %+v", ticket)
 	}
 	if u.Query().Get("existing") != "1" {
 		t.Fatalf("existing query parameter was lost: %q", u.RawQuery)
-	}
-	if grantPayload["ticket"] != u.Query().Get(webdavauth.QueryParameter) {
-		t.Fatalf("grant did not register the issued ticket: %#v", grantPayload)
-	}
-	if strings.Contains(temporaryPath, "/.tmp-") {
-		t.Fatalf("grant temporary path uses Apache-hidden component: %q", temporaryPath)
 	}
 }
 
@@ -237,12 +227,7 @@ func TestAuthorizeWebDAVStateBindsUserAndReturnsExchangeURL(t *testing.T) {
 		WebDAVAuthAudience: "storage-1",
 	}, authClient: gowebdav.NewClient(control.URL+"/webdav-auth/grants/", "", "")}
 	ticket, err := webdavauth.Issue("secret", webdavauth.Ticket{
-		Audience:  "storage-1",
-		Path:      "/download/file.mp4",
-		UserID:    7,
-		Username:  "alice",
-		IssuedAt:  time.Now().Add(-time.Second).Unix(),
-		ExpiresAt: time.Now().Add(time.Minute).Unix(),
+		Audience: "storage-1", Path: "/download/file.mp4", UserID: 7, Username: "alice",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -255,7 +240,7 @@ func TestAuthorizeWebDAVStateBindsUserAndReturnsExchangeURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Path != "/webdav-auth/exchange" || parsed.Query().Get("state") != "state-123" {
+	if parsed.Path != "/webdav-auth/exchange" || parsed.Query().Get("state") != "state-123" || parsed.Query().Get("grant_id") == "" {
 		t.Fatalf("unexpected exchange URL: %s", got)
 	}
 	if grantPayload["state"] != "state-123" {
@@ -275,25 +260,16 @@ func TestTicketedLinkLeavesExchangeForTheClient(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer data.Close()
-	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPut && r.Method != "MOVE" {
-			t.Fatalf("grant request method = %s, want PUT or MOVE", r.Method)
-		}
-		w.WriteHeader(http.StatusCreated)
-	}))
-	defer control.Close()
-
 	d := &WebDav{
 		Addition: Addition{
-			WebDAVAuthEnabled:   true,
-			WebDAVAuthSecret:    "secret",
-			WebDAVAuthAudience:  "storage-1",
-			WebDAVAuthTicketTTL: 60,
+			WebDAVAuthEnabled:  true,
+			WebDAVAuthSecret:   "secret",
+			WebDAVAuthAudience: "storage-1",
 		},
-		client:     gowebdav.NewClient(data.URL+"/download/", "", ""),
-		authClient: gowebdav.NewClient(control.URL+"/webdav-auth/grants/", "", ""),
+		client: gowebdav.NewClient(data.URL+"/download/", "", ""),
 	}
 	ctx := context.WithValue(context.Background(), conf.UserKey, &model.User{ID: 7, Username: "alice"})
+	ctx = context.WithValue(ctx, conf.TokenKey, "jwt-a")
 	link, err := d.Link(ctx, &model.Object{Path: "/file", Name: "file"}, model.LinkArgs{Redirect: true})
 	if err != nil {
 		t.Fatalf("Link failed: %v", err)

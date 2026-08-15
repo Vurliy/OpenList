@@ -31,6 +31,11 @@ func AuthorizeWebDAV(c *gin.Context) {
 		common.ErrorStrResp(c, "OpenList login is required for WebDAV authorization", 401)
 		return
 	}
+	rawToken, _ := c.Request.Context().Value(conf.TokenKey).(string)
+	if rawToken == "" {
+		common.ErrorStrResp(c, "OpenList authorization token is required", 401)
+		return
+	}
 
 	var lastErr error
 	for _, storage := range op.GetAllStorages() {
@@ -38,7 +43,7 @@ func AuthorizeWebDAV(c *gin.Context) {
 		if !ok || !driver.WebDAVAuthEnabled {
 			continue
 		}
-		redirectURL, err := driver.AuthorizeWebDAVState(req.Ticket, req.State, user)
+		redirectURL, err := driver.AuthorizeWebDAVState(req.Ticket, req.State, rawToken, user)
 		if err == nil {
 			common.SuccessResp(c, gin.H{"redirect_url": redirectURL})
 			return
