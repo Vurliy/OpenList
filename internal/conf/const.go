@@ -189,6 +189,10 @@ const (
 	NoTaskKey
 	ApiUrlKey
 	UserKey
+	// TokenKey contains the raw OpenList Authorization token for request-scoped
+	// operations that need a non-reversible token digest. It must never be
+	// persisted or logged.
+	TokenKey
 	MetaKey
 	MetaPassKey
 	ClientIPKey
