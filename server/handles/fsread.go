@@ -44,6 +44,7 @@ type ObjResp struct {
 	HashInfoStr  string                     `json:"hashinfo"`
 	HashInfo     map[*utils.HashType]string `json:"hash_info"`
 	MountDetails *model.StorageDetails      `json:"mount_details,omitempty"`
+	RawURL       string                     `json:"raw_url,omitempty"`
 }
 
 type FsListResp struct {
@@ -229,6 +230,7 @@ func toObjsResp(objs []model.Obj, parent string, encrypt bool) []ObjResp {
 	var resp []ObjResp
 	for _, obj := range objs {
 		thumb, _ := model.GetThumb(obj)
+		rawURL, _ := model.GetUrl(obj)
 		mountDetails, _ := model.GetStorageDetails(obj)
 		resp = append(resp, ObjResp{
 			Name:         obj.GetName(),
@@ -242,6 +244,7 @@ func toObjsResp(objs []model.Obj, parent string, encrypt bool) []ObjResp {
 			Thumb:        thumb,
 			Type:         utils.GetObjType(obj.GetName(), obj.IsDir()),
 			MountDetails: mountDetails,
+			RawURL:       rawURL,
 		})
 	}
 	return resp
