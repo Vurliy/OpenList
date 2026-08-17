@@ -16,28 +16,33 @@ import (
 )
 
 const (
-	TicketVersion        = 3
+	TicketVersion        = 4
 	QueryParameter       = "ticket"
 	AuthGeneration       = "fixed-v1"
-	GrantVersion         = 3
+	GrantVersion         = 4
 	GrantTypeSessionBind = "session_bind"
+	TicketTypeFile       = "file"
+	TicketTypeDirectory  = "directory"
 	// DefaultAuthNonce is only a compatibility value for old storage records.
 	// Production storage records should set webdav_auth_nonce explicitly.
 	DefaultAuthNonce = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 )
 
-// Ticket is retained as the public name used by the driver. It is the v3
-// payload: no raw JWT, nonce, expiry or random jti is included.
+// Ticket is the deterministic v4 payload. File tickets bind one resource to
+// Path; directory tickets bind a whole directory scope and leave Path empty so
+// every thumbnail in that directory can reuse one ticket.
 type Ticket struct {
 	Version     int    `json:"v"`
+	Type        string `json:"type"`
 	Audience    string `json:"aud"`
 	UserID      uint   `json:"uid"`
 	TokenDigest string `json:"token_digest"`
 	Scope       string `json:"scope"`
-	Path        string `json:"path"`
+	Path        string `json:"path,omitempty"`
+	Recursive   bool   `json:"recursive,omitempty"`
 	Generation  string `json:"auth_generation"`
 	// Deprecated v1 fields are kept only so older callers can be migrated
-	// without a source-level break. v3 issuance and verification ignore them.
+	// without a source-level break. v4 issuance and verification ignore them.
 	Username  string `json:"-"`
 	IssuedAt  int64  `json:"-"`
 	ExpiresAt int64  `json:"-"`
@@ -135,7 +140,7 @@ func DeriveKey(secret, nonce string) ([]byte, error) {
 		return nil, err
 	}
 	h := hmac.New(sha256.New, []byte(secret))
-	_, _ = h.Write([]byte("openlist-webdav-ticket-v3\x00"))
+	_, _ = h.Write([]byte("openlist-webdav-ticket-v4\x00"))
 	decoded, _ := base64.RawURLEncoding.DecodeString(nonce)
 	_, _ = h.Write(decoded)
 	return h.Sum(nil), nil
@@ -145,14 +150,31 @@ func IssuePathBound(secret, nonce string, ticket Ticket) (string, error) {
 	if ticket.Version == 0 {
 		ticket.Version = TicketVersion
 	}
-	if ticket.Version != TicketVersion || ticket.Audience == "" || ticket.TokenDigest == "" ||
-		ticket.Scope == "" || ticket.Path == "" {
+	if ticket.Version != TicketVersion || ticket.Audience == "" || ticket.TokenDigest == "" || ticket.Scope == "" {
 		return "", errors.New("invalid webdav ticket claims")
 	}
-	ticket.Scope, _ = CanonicalPath(ticket.Scope)
-	ticket.Path, _ = CanonicalPath(ticket.Path)
-	if !ScopeContains(ticket.Scope, ticket.Path) {
-		return "", errors.New("webdav ticket path is outside scope")
+	if ticket.Type == "" {
+		ticket.Type = TicketTypeFile
+	}
+	if ticket.Type != TicketTypeFile && ticket.Type != TicketTypeDirectory {
+		return "", errors.New("invalid webdav ticket type")
+	}
+	if ticket.Type == TicketTypeFile && ticket.Path == "" {
+		return "", errors.New("file webdav ticket path is empty")
+	}
+	if ticket.Type == TicketTypeDirectory && ticket.Path != "" {
+		return "", errors.New("directory webdav ticket must not contain a path")
+	}
+	var err error
+	ticket.Scope, err = CanonicalPath(ticket.Scope)
+	if err != nil {
+		return "", err
+	}
+	if ticket.Path != "" {
+		ticket.Path, err = CanonicalPath(ticket.Path)
+		if err != nil || !ScopeContains(ticket.Scope, ticket.Path) {
+			return "", errors.New("webdav ticket path is outside scope")
+		}
 	}
 	if ticket.Generation == "" {
 		ticket.Generation = AuthGeneration
@@ -192,8 +214,17 @@ func VerifyPathBound(secret, nonce, token, publicPath string) (Ticket, error) {
 		return ticket, errors.New("invalid webdav ticket signature")
 	}
 	if err := json.Unmarshal(payload, &ticket); err != nil || ticket.Version != TicketVersion ||
-		ticket.Audience == "" || ticket.TokenDigest == "" || ticket.Scope == "" || ticket.Path == "" {
+		ticket.Type == "" || ticket.Audience == "" || ticket.TokenDigest == "" || ticket.Scope == "" {
 		return ticket, errors.New("invalid webdav ticket claims")
+	}
+	if ticket.Type != TicketTypeFile && ticket.Type != TicketTypeDirectory {
+		return ticket, errors.New("invalid webdav ticket type")
+	}
+	if ticket.Type == TicketTypeFile && ticket.Path == "" {
+		return ticket, errors.New("file webdav ticket path is empty")
+	}
+	if ticket.Type == TicketTypeDirectory && ticket.Path != "" {
+		return ticket, errors.New("directory webdav ticket must not contain a path")
 	}
 	if ticket.Generation == "" {
 		return ticket, errors.New("webdav ticket generation is empty")
@@ -202,14 +233,23 @@ func VerifyPathBound(secret, nonce, token, publicPath string) (Ticket, error) {
 	if err != nil {
 		return ticket, err
 	}
-	ticket.Path, err = CanonicalPath(ticket.Path)
-	if err != nil || !ScopeContains(ticket.Scope, ticket.Path) {
-		return ticket, errors.New("webdav ticket path is outside scope")
+	if ticket.Path != "" {
+		ticket.Path, err = CanonicalPath(ticket.Path)
+		if err != nil || !ScopeContains(ticket.Scope, ticket.Path) {
+			return ticket, errors.New("webdav ticket path is outside scope")
+		}
 	}
 	if publicPath != "" {
 		publicPath, err = CanonicalPath(publicPath)
-		if err != nil || publicPath != ticket.Path {
+		if err != nil {
 			return ticket, errors.New("webdav ticket path mismatch")
+		}
+		if ticket.Type == TicketTypeFile {
+			if publicPath != ticket.Path {
+				return ticket, errors.New("webdav ticket path mismatch")
+			}
+		} else if !ScopeContains(ticket.Scope, publicPath) || (!ticket.Recursive && path.Dir(publicPath) != ticket.Scope) {
+			return ticket, errors.New("webdav directory ticket scope mismatch")
 		}
 	}
 	return ticket, nil

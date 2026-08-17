@@ -5,7 +5,7 @@ import (
 	"encoding/base64"
 	"image/png"
 
-	webdavdriver "github.com/OpenListTeam/OpenList/v4/drivers/webdav"
+	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
@@ -186,8 +186,8 @@ func LogOut(c *gin.Context) {
 	user, _ := c.Request.Context().Value(conf.UserKey).(*model.User)
 	if user != nil && !user.IsGuest() {
 		for _, storage := range op.GetAllStorages() {
-			if driver, ok := storage.(*webdavdriver.WebDav); ok {
-				if err := driver.RevokeWebDAVUser(user); err != nil {
+			if authorizer, ok := storage.(driver.WebDAVTicketAuthorizer); ok {
+				if err := authorizer.RevokeWebDAVUser(user); err != nil {
 					log.Warnf("failed to revoke WebDAV sessions for %s: %v", user.Username, err)
 				}
 			}

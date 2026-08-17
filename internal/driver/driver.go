@@ -218,3 +218,8 @@ type DirectUploader interface {
 	// return errs.NotImplement if the driver does not support the given direct upload tool
 	GetDirectUploadInfo(ctx context.Context, tool string, dstDir model.Obj, fileName string, fileSize int64) (any, error)
 }
+
+type WebDAVTicketAuthorizer interface {
+	AuthorizeWebDAVState(ticket, state string, args ...any) (string, error)
+	RevokeWebDAVUser(user *model.User) error
+}

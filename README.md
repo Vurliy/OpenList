@@ -1,3 +1,11 @@
+# OpenList Backend Core Service
+
+> **上级索引 / 被引用自**：[openlist/source code/README.md](../README.md)
+
+本项目是 OpenList 的后端核心 Go 服务源码仓库。包含多存储驱动集成（含标准纯净 `WebDav` 驱动与定制 `WebDavTicket` 签名直链驱动）、两阶段 Exchange 握手授权接口、全局即时会话撤销及静态前端资源嵌入。
+
+---
+
 <div align="center">
   <img src="https://raw.githubusercontent.com/OpenListTeam/Logo/main/logo.svg" width="128" height="128" alt="logo" />
 

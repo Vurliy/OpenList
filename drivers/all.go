@@ -83,6 +83,7 @@ import (
 	_ "github.com/OpenListTeam/OpenList/v4/drivers/uss"
 	_ "github.com/OpenListTeam/OpenList/v4/drivers/virtual"
 	_ "github.com/OpenListTeam/OpenList/v4/drivers/webdav"
+	_ "github.com/OpenListTeam/OpenList/v4/drivers/webdav_ticket"
 	_ "github.com/OpenListTeam/OpenList/v4/drivers/weiyun"
 	_ "github.com/OpenListTeam/OpenList/v4/drivers/wopan"
 	_ "github.com/OpenListTeam/OpenList/v4/drivers/wps"

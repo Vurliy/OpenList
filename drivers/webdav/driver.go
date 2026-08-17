@@ -2,34 +2,26 @@ package webdav
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"path"
-	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
-	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/pkg/cron"
 	"github.com/OpenListTeam/OpenList/v4/pkg/gowebdav"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
-	"github.com/OpenListTeam/OpenList/v4/pkg/webdavauth"
 )
 
 type WebDav struct {
 	model.Storage
 	Addition
-	client     *gowebdav.Client
-	authClient *gowebdav.Client
-	cron       *cron.Cron
-	thumbMu    sync.Mutex
+	client *gowebdav.Client
+	cron   *cron.Cron
 }
 
 func (d *WebDav) Config() driver.Config {
@@ -37,35 +29,10 @@ func (d *WebDav) Config() driver.Config {
 }
 
 func (d *WebDav) GetAddition() driver.Additional {
-	if d.WebDAVAuthScope == "" {
-		d.WebDAVAuthScope = "/download"
-	}
-	if d.WebDAVAuthNonce == "" {
-		d.WebDAVAuthNonce = webdavauth.DefaultAuthNonce
-	}
 	return &d.Addition
 }
 
 func (d *WebDav) Init(ctx context.Context) error {
-	if d.WebDAVAuthEnabled {
-		if d.WebDAVAuthSecret == "" {
-			return errors.New("webdav auth is enabled but webdav_auth_secret is empty")
-		}
-		if d.WebDAVAuthAudience == "" {
-			return errors.New("webdav auth is enabled but webdav_auth_audience is empty")
-		}
-		if d.WebDAVAuthScope == "" {
-			d.WebDAVAuthScope = "/download"
-		}
-		if _, err := webdavauth.CanonicalPath(d.WebDAVAuthScope); err != nil {
-			return fmt.Errorf("invalid webdav_auth_scope: %w", err)
-		}
-		var err error
-		d.WebDAVAuthNonce, err = webdavauth.NormalizeNonce(d.WebDAVAuthNonce)
-		if err != nil {
-			return fmt.Errorf("invalid webdav_auth_nonce: %w", err)
-		}
-	}
 	err := d.setClient()
 	if err == nil {
 		d.cron = cron.NewCron(time.Hour * 12)
@@ -89,49 +56,22 @@ func (d *WebDav) List(ctx context.Context, dir model.Obj, args model.ListArgs) (
 		return nil, err
 	}
 	return utils.SliceConvert(files, func(src os.FileInfo) (model.Obj, error) {
-		obj := model.Obj(&model.Object{
+		return &model.Object{
 			Path:     path.Join(dir.GetPath(), src.Name()),
 			Name:     src.Name(),
 			Size:     src.Size(),
 			Modified: src.ModTime(),
 			IsFolder: src.IsDir(),
-		})
-		// The current WebDAV ticket flow protects direct media links, but the
-		// OpenList-side thumbnail renderer does not yet participate in that
-		// browser authorization flow. Do not publish /d/...?...type=thumb URLs
-		// for an authenticated WebDAV storage; those requests would reach the
-		// provider without a ticket and only produce noisy 500 responses. The
-		// server-side thumbnail task will re-enable this path later.
-		if d.Thumbnail && !d.WebDAVAuthEnabled && !src.IsDir() && apiURL(ctx) != "" {
-			fileType := utils.GetFileType(src.Name())
-			if fileType == conf.IMAGE || fileType == conf.VIDEO {
-				virtualPath := path.Join(args.ReqPath, src.Name())
-				obj = &model.ObjThumb{
-					Object:    *obj.(*model.Object),
-					Thumbnail: model.Thumbnail{Thumbnail: thumbURL(ctx, virtualPath)},
-				}
-			}
-		}
-		return obj, nil
+		}, nil
 	})
 }
 
 func (d *WebDav) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
-	if args.Type == "thumb" {
-		return d.thumbLink(ctx, file)
-	}
 	url, header, err := d.client.Link(file.GetPath())
 	if err != nil {
 		return nil, err
 	}
-	ticketedDirectLink := args.Redirect && d.WebDAVAuthEnabled
-	if ticketedDirectLink {
-		url, err = d.withWebDAVTicket(ctx, url)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if args.Redirect && !ticketedDirectLink {
+	if args.Redirect {
 		// get the url after redirect
 		req := base.NoRedirectClient.R()
 		req.Header = header
@@ -144,9 +84,7 @@ func (d *WebDav) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 		if (res.StatusCode() == 302 || res.StatusCode() == 307 || res.StatusCode() == 308) && res.Header().Get("location") != "" {
 			url = res.Header().Get("location")
 		} else if res.StatusCode() == http.StatusOK {
-			// A normal WebDAV server returns the file itself with 200 rather
-			// than redirecting. The URL is already a usable direct link, so do
-			// not treat the successful response as a redirect failure.
+			// standard 200 OK directly from WebDAV
 		} else {
 			return nil, fmt.Errorf("redirect failed, status: %d", res.StatusCode())
 		}
@@ -155,178 +93,6 @@ func (d *WebDav) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 		URL:    url,
 		Header: header,
 	}, nil
-}
-
-func (d *WebDav) withWebDAVTicket(ctx context.Context, rawURL string) (string, error) {
-	user, ok := ctx.Value(conf.UserKey).(*model.User)
-	if !ok || user == nil || user.IsGuest() {
-		return "", errors.New("cannot issue webdav ticket without an authenticated OpenList user")
-	}
-	rawToken, _ := ctx.Value(conf.TokenKey).(string)
-	if rawToken == "" {
-		return "", errors.New("cannot issue webdav ticket without the OpenList authorization token")
-	}
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "", err
-	}
-	publicPath, err := webdavauth.CanonicalPath(u.Path)
-	if err != nil {
-		return "", fmt.Errorf("cannot issue webdav ticket without a public URL path: %w", err)
-	}
-	tokenDigest := webdavauth.TokenDigest(rawToken)
-	scope := d.WebDAVAuthScope
-	if scope == "" {
-		scope = "/download"
-	}
-	ticket, err := webdavauth.IssuePathBound(d.WebDAVAuthSecret, d.WebDAVAuthNonce, webdavauth.Ticket{
-		Audience:    d.WebDAVAuthAudience,
-		UserID:      user.ID,
-		TokenDigest: tokenDigest,
-		Scope:       scope,
-		Path:        publicPath,
-		Generation:  webdavauth.AuthGeneration,
-	})
-	if err != nil {
-		return "", err
-	}
-	query := u.Query()
-	query.Set(webdavauth.QueryParameter, ticket)
-	u.RawQuery = query.Encode()
-	return u.String(), nil
-}
-
-func (d *WebDav) writeWebDAVGrant(ticket string, user *model.User, tokenDigest, state string) (string, error) {
-	if d.authClient == nil {
-		return "", errors.New("webdav auth control client is not initialized")
-	}
-	claims, err := webdavauth.VerifyPathBound(d.WebDAVAuthSecret, d.WebDAVAuthNonce, ticket, "")
-	if err != nil {
-		return "", fmt.Errorf("verify webdav grant before upload: %w", err)
-	}
-	if claims.Audience != d.WebDAVAuthAudience || claims.TokenDigest != tokenDigest {
-		return "", errors.New("webdav grant identity does not match the current OpenList token")
-	}
-	grantID, err := webdavauth.NewGrantID()
-	if err != nil {
-		return "", fmt.Errorf("generate webdav grant id: %w", err)
-	}
-	now := time.Now().Unix()
-	grant, err := webdavauth.NewGrant(grantID, ticket, d.WebDAVAuthNonce, state, claims, now, now+300)
-	if err != nil {
-		return "", err
-	}
-	grant.UserID = user.ID
-	grant.Signature = webdavauth.SignGrant(d.WebDAVAuthSecret, grant)
-	data, err := json.Marshal(grant)
-	if err != nil {
-		return "", fmt.Errorf("marshal webdav grant: %w", err)
-	}
-	finalName := grant.GrantID + ".json"
-	temporaryName := "tmp-" + grant.GrantID + ".json"
-	if err := d.authClient.Write(temporaryName, data, 0600); err != nil {
-		return "", fmt.Errorf("write temporary webdav grant: %w", err)
-	}
-	if err := d.authClient.Rename(temporaryName, finalName, true); err != nil {
-		return "", fmt.Errorf("publish webdav grant: %w", err)
-	}
-	return grant.GrantID, nil
-}
-
-// AuthorizeWebDAVState binds a browser-generated WebDAV state to the
-// currently authenticated OpenList user. Apache will not exchange the
-// ticket until the state cookie and this grant match.
-func (d *WebDav) AuthorizeWebDAVState(ticket, state string, args ...any) (string, error) {
-	if !d.WebDAVAuthEnabled {
-		return "", errors.New("webdav state authorization is disabled")
-	}
-	if state == "" {
-		return "", errors.New("webdav authorization state is empty")
-	}
-	var rawToken string
-	var user *model.User
-	if len(args) == 2 {
-		rawToken, _ = args[0].(string)
-		user, _ = args[1].(*model.User)
-	} else if len(args) == 1 {
-		// Source compatibility for the pre-v3 test/integration API. New callers
-		// must always provide the raw request token explicitly.
-		user, _ = args[0].(*model.User)
-		if user != nil {
-			rawToken = user.Username
-		}
-	}
-	if rawToken == "" {
-		return "", errors.New("OpenList authorization token is empty")
-	}
-	claims, err := webdavauth.VerifyPathBound(d.WebDAVAuthSecret, d.WebDAVAuthNonce, ticket, "")
-	if err != nil {
-		return "", fmt.Errorf("verify webdav authorization ticket: %w", err)
-	}
-	if user == nil || user.IsGuest() || claims.UserID != user.ID || claims.TokenDigest != webdavauth.TokenDigest(rawToken) {
-		return "", errors.New("webdav authorization user mismatch")
-	}
-	grantID, err := d.writeWebDAVGrant(ticket, user, claims.TokenDigest, state)
-	if err != nil {
-		return "", err
-	}
-	return d.webDAVExchangeURL(ticket, state, grantID)
-}
-
-// RevokeWebDAVUser publishes a revocation marker through the OpenList-only
-// WebDAV control credential. Apache reads this marker while validating its
-// own session files; OpenList never edits those session files directly.
-func (d *WebDav) RevokeWebDAVUser(user *model.User) error {
-	if !d.WebDAVAuthEnabled || user == nil || user.IsGuest() {
-		return nil
-	}
-	address, err := d.authRevocationAddress()
-	if err != nil {
-		return err
-	}
-	client, err := d.newControlClient(address)
-	if err != nil {
-		return err
-	}
-	data, err := json.Marshal(map[string]any{
-		"v":          1,
-		"uid":        user.ID,
-		"revoked_at": time.Now().Unix(),
-	})
-	if err != nil {
-		return err
-	}
-	name := fmt.Sprintf("user-%d.json", user.ID)
-	// Keep the temporary revocation marker outside Apache's hidden-path deny
-	// rule; the final marker is still published atomically with MOVE.
-	tmp := "tmp-" + name
-	if err := client.Write(tmp, data, 0600); err != nil {
-		return fmt.Errorf("write WebDAV revocation marker: %w", err)
-	}
-	if err := client.Rename(tmp, name, true); err != nil {
-		return fmt.Errorf("publish WebDAV revocation marker: %w", err)
-	}
-	return nil
-}
-
-func (d *WebDav) webDAVExchangeURL(ticket, state, grantID string) (string, error) {
-	base, err := url.Parse(d.Address)
-	if err != nil {
-		return "", err
-	}
-	if base.Scheme == "" || base.Host == "" {
-		return "", errors.New("webdav address must include scheme and host")
-	}
-	base.Path = "/webdav-auth/exchange"
-	base.RawPath = ""
-	base.RawQuery = ""
-	base.Fragment = ""
-	query := base.Query()
-	query.Set(webdavauth.QueryParameter, ticket)
-	query.Set("state", state)
-	query.Set("grant_id", grantID)
-	base.RawQuery = query.Encode()
-	return base.String(), nil
 }
 
 func (d *WebDav) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) error {
@@ -366,13 +132,6 @@ func (d *WebDav) Put(ctx context.Context, dstDir model.Obj, s model.FileStreamer
 func (d *WebDav) Get(ctx context.Context, _path string) (model.Obj, error) {
 	_path = path.Join(d.GetRootPath(), _path)
 	info, err := d.client.Stat(_path)
-	// Apache mod_dav_fs redirects a directory URL without a trailing slash.
-	// gowebdav's PROPFIND client does not retain the PROPFIND method while
-	// following that redirect, so the redirect can surface as a 404/3xx here.
-	// Retry the directory form explicitly, while keeping file paths unchanged.
-	if err != nil && _path != "/" && _path[len(_path)-1] != '/' && isDirectoryStatRedirect(err) {
-		info, err = d.client.Stat(_path + "/")
-	}
 	if err != nil {
 		if gowebdav.IsErrNotFound(err) {
 			return nil, errs.ObjectNotFound
@@ -381,9 +140,6 @@ func (d *WebDav) Get(ctx context.Context, _path string) (model.Obj, error) {
 	}
 
 	name := info.Name()
-	// Some WebDAV servers (including Apache mod_dav_fs in our deployment)
-	// omit DAV:displayname. Keep the object usable by deriving the name from
-	// the requested path; the API uses it to classify video/image files.
 	if name == "" && _path != "/" {
 		name = path.Base(_path)
 	}
@@ -395,21 +151,6 @@ func (d *WebDav) Get(ctx context.Context, _path string) (model.Obj, error) {
 		IsFolder: info.IsDir(),
 		Path:     _path,
 	}, nil
-}
-
-func isDirectoryStatRedirect(err error) bool {
-	for _, status := range []int{
-		http.StatusMovedPermanently,
-		http.StatusFound,
-		http.StatusTemporaryRedirect,
-		http.StatusPermanentRedirect,
-		http.StatusNotFound,
-	} {
-		if gowebdav.IsErrCode(err, status) {
-			return true
-		}
-	}
-	return false
 }
 
 var _ driver.Driver = (*WebDav)(nil)

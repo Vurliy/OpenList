@@ -36,7 +36,9 @@ func Down(c *gin.Context) {
 			Redirect: true,
 		})
 		if err != nil {
-			common.ErrorPage(c, err, 500)
+			// If redirect direct link cannot be issued (e.g. ticket signing requires user token for WebDAV),
+			// fall back to streaming proxy rather than returning an unhandled 500 error.
+			Proxy(c)
 			return
 		}
 		redirect(c, link)

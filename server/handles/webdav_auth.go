@@ -3,8 +3,8 @@ package handles
 import (
 	"errors"
 
-	webdavdriver "github.com/OpenListTeam/OpenList/v4/drivers/webdav"
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
+	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/server/common"
@@ -39,11 +39,11 @@ func AuthorizeWebDAV(c *gin.Context) {
 
 	var lastErr error
 	for _, storage := range op.GetAllStorages() {
-		driver, ok := storage.(*webdavdriver.WebDav)
-		if !ok || !driver.WebDAVAuthEnabled {
+		authorizer, ok := storage.(driver.WebDAVTicketAuthorizer)
+		if !ok {
 			continue
 		}
-		redirectURL, err := driver.AuthorizeWebDAVState(req.Ticket, req.State, rawToken, user)
+		redirectURL, err := authorizer.AuthorizeWebDAVState(req.Ticket, req.State, rawToken, user)
 		if err == nil {
 			common.SuccessResp(c, gin.H{"redirect_url": redirectURL})
 			return
@@ -51,7 +51,7 @@ func AuthorizeWebDAV(c *gin.Context) {
 		lastErr = err
 	}
 	if lastErr == nil {
-		lastErr = errors.New("no enabled WebDAV storage accepted this ticket")
+		lastErr = errors.New("no enabled WebDAVTicket storage accepted this ticket")
 	}
 	common.ErrorResp(c, lastErr, 401)
 }
@@ -70,12 +70,12 @@ func RevokeWebDAV(c *gin.Context) {
 	configured := false
 	var lastErr error
 	for _, storage := range op.GetAllStorages() {
-		driver, ok := storage.(*webdavdriver.WebDav)
-		if !ok || !driver.WebDAVAuthEnabled {
+		authorizer, ok := storage.(driver.WebDAVTicketAuthorizer)
+		if !ok {
 			continue
 		}
 		configured = true
-		if err := driver.RevokeWebDAVUser(user); err != nil {
+		if err := authorizer.RevokeWebDAVUser(user); err != nil {
 			lastErr = err
 		}
 	}
