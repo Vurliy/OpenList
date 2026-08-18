@@ -3,6 +3,7 @@ package webdav_ticket
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
+	log "github.com/sirupsen/logrus"
 )
 
 type dirSizeQueryReq struct {
@@ -32,6 +34,17 @@ type diskUsageResp struct {
 	Free  int64 `json:"free"`
 }
 
+func (d *WebDavTicket) httpClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: d.TlsInsecureSkipVerify,
+			},
+		},
+	}
+}
+
 func (d *WebDavTicket) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
 	if d.Address == "" {
 		return nil, fmt.Errorf("webdav address is empty")
@@ -43,14 +56,16 @@ func (d *WebDavTicket) GetDetails(ctx context.Context) (*model.StorageDetails, e
 	}
 	req.SetBasicAuth(d.Username, d.Password)
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := d.httpClient(3 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
+		log.Warnf("[WebDavTicket] GetDetails error: %v", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		log.Warnf("[WebDavTicket] GetDetails status: %d", resp.StatusCode)
 		return nil, fmt.Errorf("dirsize disk_usage returned status: %d", resp.StatusCode)
 	}
 
@@ -80,19 +95,22 @@ func (d *WebDavTicket) queryDirSizes(ctx context.Context, dirPath string) map[st
 	req.Header.Set("Content-Type", "application/json")
 	req.SetBasicAuth(d.Username, d.Password)
 
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := d.httpClient(3 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
+		log.Warnf("[WebDavTicket] queryDirSizes error for %s: %v", dirPath, err)
 		return nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		log.Warnf("[WebDavTicket] queryDirSizes status for %s: %d", dirPath, resp.StatusCode)
 		return nil
 	}
 
 	var data dirSizeQueryResp
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		log.Warnf("[WebDavTicket] queryDirSizes decode error for %s: %v", dirPath, err)
 		return nil
 	}
 
