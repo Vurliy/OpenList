@@ -2,6 +2,7 @@
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -134,6 +135,13 @@ func (d *WebDavTicket) Link(ctx context.Context, file model.Obj, args model.Link
 	url, header, err := d.client.Link(file.GetPath())
 	if err != nil {
 		return nil, err
+	}
+	if header == nil {
+		header = make(http.Header)
+	}
+	if header.Get("Authorization") == "" && d.Username != "" {
+		auth := "Basic " + base64.StdEncoding.EncodeToString([]byte(d.Username+":"+d.Password))
+		header.Set("Authorization", auth)
 	}
 	if args.Redirect {
 		url, err = d.withWebDAVTicket(ctx, url)
