@@ -41,6 +41,12 @@ func Down(c *gin.Context) {
 			Proxy(c)
 			return
 		}
+		// If storage is WebDavTicket and the client has no authenticated user JWT token
+		// (e.g. external players or download managers hitting /d/...), stream via Proxy to guarantee immediate playback.
+		if storage.Config().Name == "WebDavTicket" && c.Request.Context().Value(conf.TokenKey) == nil {
+			Proxy(c)
+			return
+		}
 		redirect(c, link)
 	}
 }
