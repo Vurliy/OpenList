@@ -114,6 +114,8 @@ func (d *WebDavTicket) queryDirSizes(ctx context.Context, dirPath string) map[st
 		return nil
 	}
 
+	log.Infof("[WebDavTicket] queryDirSizes for %s: status=%s, children=%+v", dirPath, data.Status, data.DirectChildrenSizes)
+
 	if (data.Status == "ready" || data.Status == "cooling_down") && data.DirectChildrenSizes != nil {
 		return data.DirectChildrenSizes
 	}

@@ -87,11 +87,18 @@ func (d *WebDavTicket) List(ctx context.Context, dir model.Obj, args model.ListA
 	if err != nil {
 		return nil, err
 	}
+	dirSizes := d.queryDirSizes(ctx, dir.GetPath())
 	return utils.SliceConvert(files, func(src os.FileInfo) (model.Obj, error) {
+		sz := src.Size()
+		if src.IsDir() && dirSizes != nil {
+			if s, ok := dirSizes[src.Name()]; ok {
+				sz = s
+			}
+		}
 		obj := model.Obj(&model.Object{
 			Path:     path.Join(dir.GetPath(), src.Name()),
 			Name:     src.Name(),
-			Size:     src.Size(),
+			Size:     sz,
 			Modified: src.ModTime(),
 			IsFolder: src.IsDir(),
 		})
