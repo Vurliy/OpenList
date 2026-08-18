@@ -1,4 +1,4 @@
-package webdav_ticket
+﻿package webdav_ticket
 
 import (
 	"context"
