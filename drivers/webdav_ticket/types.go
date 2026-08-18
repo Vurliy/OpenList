@@ -15,7 +15,5 @@ type Addition struct {
 	WebDAVAuthNonce       string `json:"webdav_auth_nonce" type:"text" default:"fixed-v1" help:"base64url nonce shared with the WebDAV ticket verifier"`
 	WebDAVAuthScope       string `json:"webdav_auth_scope" default:"/download" help:"public WebDAV path scope for browser links"`
 	Thumbnail             bool   `json:"thumbnail" default:"true" help:"enable WebDAV thumbnails via worker"`
-	ThumbCacheFolder      string `json:"thumb_cache_folder" help:"optional local thumbnail cache folder"`
-	VideoThumbPos         string `json:"video_thumb_pos" default:"20%" help:"video snapshot position in seconds or percentage"`
 	TlsInsecureSkipVerify bool   `json:"tls_insecure_skip_verify" default:"false"`
 }
