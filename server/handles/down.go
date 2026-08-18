@@ -25,7 +25,10 @@ func Down(c *gin.Context) {
 		common.ErrorPage(c, err, 500)
 		return
 	}
-	if c.Query("type") == "thumb" || common.ShouldProxy(storage, filename) {
+	// For WebDavTicket storages without user JWT context (e.g. external players or download managers hitting /d/...),
+	// stream via Proxy to guarantee immediate playback without 401 unauthenticated redirect errors.
+	isUnauthenticatedWebDavTicket := storage.Config().Name == "WebDavTicket" && c.Request.Context().Value(conf.TokenKey) == nil
+	if c.Query("type") == "thumb" || common.ShouldProxy(storage, filename) || isUnauthenticatedWebDavTicket {
 		Proxy(c)
 		return
 	} else {
@@ -36,14 +39,6 @@ func Down(c *gin.Context) {
 			Redirect: true,
 		})
 		if err != nil {
-			// If redirect direct link cannot be issued (e.g. ticket signing requires user token for WebDAV),
-			// fall back to streaming proxy rather than returning an unhandled 500 error.
-			Proxy(c)
-			return
-		}
-		// If storage is WebDavTicket and the client has no authenticated user JWT token
-		// (e.g. external players or download managers hitting /d/...), stream via Proxy to guarantee immediate playback.
-		if storage.Config().Name == "WebDavTicket" && c.Request.Context().Value(conf.TokenKey) == nil {
 			Proxy(c)
 			return
 		}
@@ -141,7 +136,7 @@ func proxy(c *gin.Context, link *model.Link, file model.Obj, proxyRange bool) {
 // 4. proxy_types
 // solution: text_file + shouldProxy()
 func canProxy(storage driver.Driver, filename string, force bool) bool {
-	if force || storage.Config().MustProxy() || storage.GetStorage().WebProxy || storage.GetStorage().WebdavProxyURL() {
+	if force || storage.Config().MustProxy() || storage.GetStorage().WebProxy || storage.GetStorage().WebdavProxyURL() || storage.Config().Name == "WebDavTicket" {
 		return true
 	}
 	if utils.SliceContains(conf.SlicesMap[conf.ProxyTypes], utils.Ext(filename)) {
