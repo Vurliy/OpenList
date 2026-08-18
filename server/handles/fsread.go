@@ -1,6 +1,7 @@
-﻿package handles
+package handles
 
 import (
+	"github.com/OpenListTeam/OpenList/v4/drivers/webdav_ticket"
 	"fmt"
 	stdpath "path"
 	"strings"
@@ -257,11 +258,13 @@ type FsGetReq struct {
 
 type FsGetResp struct {
 	ObjResp
-	RawURL   string    `json:"raw_url"`
-	Readme   string    `json:"readme"`
-	Header   string    `json:"header"`
-	Provider string    `json:"provider"`
-	Related  []ObjResp `json:"related"`
+	RawURL                  string    `json:"raw_url"`
+	Readme                  string    `json:"readme"`
+	Header                  string    `json:"header"`
+	Provider                string    `json:"provider"`
+	ShowProxyPlayerButtons  *bool     `json:"show_proxy_player_buttons"`
+	ShowDirectPlayerButtons *bool     `json:"show_direct_player_buttons"`
+	Related                 []ObjResp `json:"related"`
 }
 
 func FsGetSplit(c *gin.Context) {
@@ -359,7 +362,21 @@ func FsGet(c *gin.Context, req *FsGetReq, user *model.User) {
 	parentMeta, _ := op.GetNearestMeta(parentPath)
 	thumb, _ := model.GetThumb(obj)
 	mountDetails, _ := model.GetStorageDetails(obj)
+
+	var showProxyBtn *bool
+	var showDirectBtn *bool
+	if storage != nil && storage.Config().Name == "WebDavTicket" {
+		if addition, ok := storage.GetAddition().(*webdav_ticket.Addition); ok && addition != nil {
+			proxyVal := addition.ShowProxyPlayerButtons
+			directVal := addition.ShowDirectPlayerButtons
+			showProxyBtn = &proxyVal
+			showDirectBtn = &directVal
+		}
+	}
+
 	common.SuccessResp(c, FsGetResp{
+		ShowProxyPlayerButtons:  showProxyBtn,
+		ShowDirectPlayerButtons: showDirectBtn,
 		ObjResp: ObjResp{
 			Name:         obj.GetName(),
 			Size:         obj.GetSize(),
