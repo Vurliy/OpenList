@@ -1,7 +1,7 @@
 ﻿package webdav_ticket
 
 import (
-	"context"
+		"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -187,6 +187,14 @@ func (d *WebDavTicket) issueTicket(ctx context.Context, ticket webdavauth.Ticket
 	ticket.UserID = user.ID
 	ticket.TokenDigest = webdavauth.TokenDigest(rawToken)
 	ticket.Generation = webdavauth.AuthGeneration
+	fep := webdavauth.GetGlobalFileEpoch(ticket.Path)
+	ufep := webdavauth.GetUserFileEpoch(user.ID, ticket.Path)
+	if fep > 1 {
+		ticket.FileEpoch = fep
+	}
+	if ufep > 1 {
+		ticket.UserFileEpoch = ufep
+	}
 	if ticket.Type == webdavauth.TicketTypeDirectory {
 		key := fmt.Sprintf("%s|%s|%d|%s|%s|%t|%s", ticket.Type, ticket.Audience,
 			ticket.UserID, ticket.TokenDigest, ticket.Scope, ticket.Recursive, ticket.Generation)
