@@ -5,44 +5,22 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"sync"
+	stdpath "path"
+	"strings"
 	"time"
 
+	"github.com/OpenListTeam/OpenList/v4/internal/conf"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/fs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
+	"github.com/OpenListTeam/OpenList/v4/pkg/webdavauth"
 	"github.com/OpenListTeam/OpenList/v4/server/common"
 	"github.com/gin-gonic/gin"
 )
 
 type RevokeTicketReq struct {
 	Path string `json:"path" binding:"required"`
-}
-
-var (
-	epochMu         sync.RWMutex
-	userFileEpoch   = make(map[string]int)
-	globalFileEpoch = make(map[string]int)
-)
-
-func GetGlobalFileEpoch(canonicalPath string) int {
-	epochMu.RLock()
-	defer epochMu.RUnlock()
-	if v, ok := globalFileEpoch[canonicalPath]; ok && v > 0 {
-		return v
-	}
-	return 1
-}
-
-func GetUserFileEpoch(uid uint, canonicalPath string) int {
-	epochMu.RLock()
-	defer epochMu.RUnlock()
-	key := fmt.Sprintf("%d:%s", uid, canonicalPath)
-	if v, ok := userFileEpoch[key]; ok && v > 0 {
-		return v
-	}
-	return 1
 }
 
 func SyncEpochToWebDAV(d driver.Driver, filename string, epoch int) error {
@@ -59,36 +37,49 @@ func SyncEpochToWebDAV(d driver.Driver, filename string, epoch int) error {
 	return nil
 }
 
+func getUserFromCtx(c *gin.Context) *model.User {
+	u, ok := c.Request.Context().Value(conf.UserKey).(*model.User)
+	if ok && u != nil {
+		return u
+	}
+	return nil
+}
+
 func RevokeUserFileTicket(c *gin.Context) {
-	user := c.MustGet("user").(*model.User)
+	user := getUserFromCtx(c)
+	if user == nil || user.IsGuest() {
+		common.ErrorStrResp(c, "Login required", 401)
+		return
+	}
 	var req RevokeTicketReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		common.ErrorResp(c, err, 400)
 		return
 	}
-	reqPath := req.Path
+	reqPath, err := user.JoinPath(req.Path)
+	if err != nil {
+		common.ErrorResp(c, err, 403)
+		return
+	}
 	obj, err := fs.Get(c.Request.Context(), reqPath, &fs.GetArgs{})
 	if err != nil {
 		common.ErrorResp(c, err, 404)
 		return
 	}
 
-	epochMu.Lock()
-	key := fmt.Sprintf("%d:%s", user.ID, reqPath)
-	cur := userFileEpoch[key]
-	if cur <= 0 {
-		cur = 1
-	}
-	newEpoch := cur + 1
-	userFileEpoch[key] = newEpoch
-	epochMu.Unlock()
-
 	storageDriver, _, err := op.GetStorageAndActualPath(reqPath)
-	if err == nil && storageDriver != nil {
-		hashKey := fmt.Sprintf("%d:%s", user.ID, reqPath)
-		hashHex := hex.EncodeToString(sha256Hash([]byte(hashKey)))
-		_ = SyncEpochToWebDAV(storageDriver, fmt.Sprintf("userfile-%s.json", hashHex), newEpoch)
+	if err != nil || storageDriver == nil {
+		common.ErrorStrResp(c, "Storage driver not found", 404)
+		return
 	}
+
+	storage := storageDriver.GetStorage()
+	scopePath := "/" + strings.Trim(stdpath.Join("/download", strings.TrimPrefix(reqPath, storage.MountPath)), "/")
+	newEpoch := webdavauth.IncrementUserFileEpoch(user.ID, scopePath)
+
+	hashKey := fmt.Sprintf("%d:%s", user.ID, scopePath)
+	hashHex := hex.EncodeToString(sha256Hash([]byte(hashKey)))
+	_ = SyncEpochToWebDAV(storageDriver, fmt.Sprintf("userfile-%s.json", hashHex), newEpoch)
 
 	freshLink, _, _ := fs.Link(c.Request.Context(), reqPath, model.LinkArgs{Redirect: true})
 	rawURL := ""
@@ -104,8 +95,8 @@ func RevokeUserFileTicket(c *gin.Context) {
 }
 
 func RevokeGlobalFileTicket(c *gin.Context) {
-	user := c.MustGet("user").(*model.User)
-	if user.Role != model.ADMIN {
+	user := getUserFromCtx(c)
+	if user == nil || user.Role != model.ADMIN {
 		common.ErrorStrResp(c, "Admin permission required", 403)
 		return
 	}
@@ -114,27 +105,29 @@ func RevokeGlobalFileTicket(c *gin.Context) {
 		common.ErrorResp(c, err, 400)
 		return
 	}
-	reqPath := req.Path
+	reqPath, err := user.JoinPath(req.Path)
+	if err != nil {
+		common.ErrorResp(c, err, 403)
+		return
+	}
 	obj, err := fs.Get(c.Request.Context(), reqPath, &fs.GetArgs{})
 	if err != nil {
 		common.ErrorResp(c, err, 404)
 		return
 	}
 
-	epochMu.Lock()
-	cur := globalFileEpoch[reqPath]
-	if cur <= 0 {
-		cur = 1
-	}
-	newEpoch := cur + 1
-	globalFileEpoch[reqPath] = newEpoch
-	epochMu.Unlock()
-
 	storageDriver, _, err := op.GetStorageAndActualPath(reqPath)
-	if err == nil && storageDriver != nil {
-		hashHex := hex.EncodeToString(sha256Hash([]byte(reqPath)))
-		_ = SyncEpochToWebDAV(storageDriver, fmt.Sprintf("file-%s.json", hashHex), newEpoch)
+	if err != nil || storageDriver == nil {
+		common.ErrorStrResp(c, "Storage driver not found", 404)
+		return
 	}
+
+	storage := storageDriver.GetStorage()
+	scopePath := "/" + strings.Trim(stdpath.Join("/download", strings.TrimPrefix(reqPath, storage.MountPath)), "/")
+	newEpoch := webdavauth.IncrementGlobalFileEpoch(scopePath)
+
+	hashHex := hex.EncodeToString(sha256Hash([]byte(scopePath)))
+	_ = SyncEpochToWebDAV(storageDriver, fmt.Sprintf("file-%s.json", hashHex), newEpoch)
 
 	freshLink, _, _ := fs.Link(c.Request.Context(), reqPath, model.LinkArgs{Redirect: true})
 	rawURL := ""
