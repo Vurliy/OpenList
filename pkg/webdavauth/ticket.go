@@ -32,21 +32,23 @@ const (
 // Path; directory tickets bind a whole directory scope and leave Path empty so
 // every thumbnail in that directory can reuse one ticket.
 type Ticket struct {
-	Version     int    `json:"v"`
-	Type        string `json:"type"`
-	Audience    string `json:"aud"`
-	UserID      uint   `json:"uid"`
-	TokenDigest string `json:"token_digest"`
-	Scope       string `json:"scope"`
-	Path        string `json:"path,omitempty"`
-	Recursive   bool   `json:"recursive,omitempty"`
-	Generation  string `json:"auth_generation"`
+	Version       int    `json:"v"`
+	Type          string `json:"type"`
+	Audience      string `json:"aud"`
+	UserID        uint   `json:"uid"`
+	TokenDigest   string `json:"token_digest"`
+	Scope         string `json:"scope"`
+	Path          string `json:"path,omitempty"`
+	Recursive     bool   `json:"recursive,omitempty"`
+	Generation    string `json:"auth_generation"`
+	FileEpoch     int    `json:"fep,omitempty"`
+	UserFileEpoch int    `json:"ufep,omitempty"`
+	ExpiresAt     int64  `json:"exp,omitempty"`
 	// Deprecated v1 fields are kept only so older callers can be migrated
 	// without a source-level break. v4 issuance and verification ignore them.
-	Username  string `json:"-"`
-	IssuedAt  int64  `json:"-"`
-	ExpiresAt int64  `json:"-"`
-	Nonce     string `json:"-"`
+	Username string `json:"-"`
+	IssuedAt int64  `json:"-"`
+	Nonce    string `json:"-"`
 }
 
 // Grant is a one-time session-bind record. It is deliberately independent of
@@ -150,7 +152,7 @@ func IssuePathBound(secret, nonce string, ticket Ticket) (string, error) {
 	if ticket.Version == 0 {
 		ticket.Version = TicketVersion
 	}
-	if ticket.Version != TicketVersion || ticket.Audience == "" || ticket.TokenDigest == "" || ticket.Scope == "" {
+	if (ticket.Version != 4 && ticket.Version != 5) || ticket.Audience == "" || ticket.TokenDigest == "" || ticket.Scope == "" {
 		return "", errors.New("invalid webdav ticket claims")
 	}
 	if ticket.Type == "" {
@@ -213,7 +215,7 @@ func VerifyPathBound(secret, nonce, token, publicPath string) (Ticket, error) {
 	if err != nil || !hmac.Equal(provided, hmacBytes(key, []byte(parts[0]))) {
 		return ticket, errors.New("invalid webdav ticket signature")
 	}
-	if err := json.Unmarshal(payload, &ticket); err != nil || ticket.Version != TicketVersion ||
+	if err := json.Unmarshal(payload, &ticket); err != nil || (ticket.Version != 4 && ticket.Version != 5) ||
 		ticket.Type == "" || ticket.Audience == "" || ticket.TokenDigest == "" || ticket.Scope == "" {
 		return ticket, errors.New("invalid webdav ticket claims")
 	}

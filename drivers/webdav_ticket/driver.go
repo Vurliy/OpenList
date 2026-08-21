@@ -150,7 +150,7 @@ func (d *WebDavTicket) Link(ctx context.Context, file model.Obj, args model.Link
 		auth := "Basic " + base64.StdEncoding.EncodeToString([]byte(d.Username+":"+d.Password))
 		header.Set("Authorization", auth)
 	}
-	if args.Redirect {
+	if args.Redirect || d.DirectMode == "direct" {
 		url, err = d.withWebDAVTicket(ctx, url)
 		if err != nil {
 			if ctx.Value(conf.TokenKey) == nil {
@@ -448,3 +448,16 @@ func isDirectoryStatRedirect(err error) bool {
 var _ driver.Driver = (*WebDavTicket)(nil)
 var _ driver.Getter = (*WebDavTicket)(nil)
 var _ driver.WebDAVTicketAuthorizer = (*WebDavTicket)(nil)
+
+
+func (d *WebDavTicket) WriteRevocationFile(name string, data []byte) error {
+	revocationAddress, err := d.authRevocationAddress()
+	if err != nil {
+		return err
+	}
+	client, err := d.newControlClient(revocationAddress)
+	if err != nil {
+		return err
+	}
+	return client.Write(name, data, 0644)
+}
