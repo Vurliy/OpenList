@@ -81,6 +81,7 @@ func Init(e *gin.Engine) {
 	auth.POST("/me/sshkey/delete", handles.DeleteMyPublicKey)
 	auth.POST("/auth/2fa/generate", handles.Generate2FA)
 	auth.POST("/auth/2fa/verify", handles.Verify2FA)
+	auth.POST("/webdav/ticket/revoke", handles.RevokeUserFileTicket)
 	auth.GET("/auth/logout", handles.LogOut)
 	auth.POST("/webdav/authorize", handles.AuthorizeWebDAV)
 	auth.POST("/webdav/revoke", handles.RevokeWebDAV)
@@ -119,6 +120,7 @@ func Init(e *gin.Engine) {
 }
 
 func admin(g *gin.RouterGroup) {
+	g.POST("/webdav/ticket/revoke_global", handles.RevokeGlobalFileTicket)
 	meta := g.Group("/meta")
 	meta.GET("/list", handles.ListMetas)
 	meta.GET("/get", handles.GetMeta)
