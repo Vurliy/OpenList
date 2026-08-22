@@ -123,6 +123,8 @@ func Init(e *gin.Engine) {
 
 func admin(g *gin.RouterGroup) {
 	g.POST("/webdav/ticket/revoke_global", handles.RevokeGlobalFileTicket)
+	g.POST("/webdav/ticket/rollover", handles.RolloverStorageGeneration)
+	g.POST("/webdav/ticket/rollover_all", handles.RolloverAllStorageGeneration)
 	meta := g.Group("/meta")
 	meta.GET("/list", handles.ListMetas)
 	meta.GET("/get", handles.GetMeta)

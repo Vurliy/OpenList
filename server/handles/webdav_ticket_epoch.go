@@ -1,6 +1,7 @@
 package handles
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
+	"github.com/OpenListTeam/OpenList/v4/internal/db"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/fs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
@@ -145,4 +147,130 @@ func RevokeGlobalFileTicket(c *gin.Context) {
 func sha256Hash(b []byte) []byte {
 	h := sha256.Sum256(b)
 	return h[:]
+}
+
+type RolloverStorageReq struct {
+	ID        uint `json:"id"`
+	StorageID uint `json:"storage_id"`
+}
+
+func RolloverStorageGeneration(c *gin.Context) {
+	user := getUserFromCtx(c)
+	if user == nil || user.Role != model.ADMIN {
+		common.ErrorStrResp(c, "Admin permission required", 403)
+		return
+	}
+	var req RolloverStorageReq
+	_ = c.ShouldBindJSON(&req)
+	storageID := req.ID
+	if storageID == 0 {
+		storageID = req.StorageID
+	}
+	if storageID == 0 {
+		common.ErrorStrResp(c, "storage_id is required", 400)
+		return
+	}
+
+	storage, err := db.GetStorageById(storageID)
+	if err != nil || storage == nil {
+		common.ErrorStrResp(c, "Storage not found", 404)
+		return
+	}
+
+	type GenerationRolloverDriver interface {
+		RolloverGeneration(ctx context.Context) (int, error)
+	}
+
+	driverInstance, err := op.GetStorageByMountPath(storage.MountPath)
+	if err != nil || driverInstance == nil {
+		common.ErrorStrResp(c, "Storage driver instance not found", 404)
+		return
+	}
+
+	roller, ok := driverInstance.(GenerationRolloverDriver)
+	if !ok {
+		common.ErrorStrResp(c, "Storage driver does not support generation rollover", 400)
+		return
+	}
+
+	newGen, err := roller.RolloverGeneration(c.Request.Context())
+	if err != nil {
+		common.ErrorStrResp(c, fmt.Sprintf("Failed to sync rollover to WebDAV: %v", err), 500)
+		return
+	}
+
+	// Persist to DB
+	additionStr := storage.Addition
+	var additionMap map[string]interface{}
+	_ = json.Unmarshal([]byte(additionStr), &additionMap)
+	if additionMap == nil {
+		additionMap = make(map[string]interface{})
+	}
+	additionMap["storage_generation"] = newGen
+	updatedBytes, _ := json.Marshal(additionMap)
+	storage.Addition = string(updatedBytes)
+	_ = op.UpdateStorage(c.Request.Context(), *storage)
+
+	common.SuccessResp(c, gin.H{
+		"message":            "Storage generation rolled over successfully",
+		"storage_id":         storage.ID,
+		"storage_generation": newGen,
+	})
+}
+
+func RolloverAllStorageGeneration(c *gin.Context) {
+	user := getUserFromCtx(c)
+	if user == nil || user.Role != model.ADMIN {
+		common.ErrorStrResp(c, "Admin permission required", 403)
+		return
+	}
+
+	storages, _, err := db.GetStorages(1, 1000)
+	if err != nil {
+		common.ErrorResp(c, err, 500)
+		return
+	}
+
+	type GenerationRolloverDriver interface {
+		RolloverGeneration(ctx context.Context) (int, error)
+	}
+
+	var affected []gin.H
+	for _, storage := range storages {
+		if storage.Disabled {
+			continue
+		}
+		driverInstance, err := op.GetStorageByMountPath(storage.MountPath)
+		if err != nil || driverInstance == nil {
+			continue
+		}
+		roller, ok := driverInstance.(GenerationRolloverDriver)
+		if !ok {
+			continue
+		}
+
+		newGen, _ := roller.RolloverGeneration(c.Request.Context())
+		additionStr := storage.Addition
+		var additionMap map[string]interface{}
+		_ = json.Unmarshal([]byte(additionStr), &additionMap)
+		if additionMap == nil {
+			additionMap = make(map[string]interface{})
+		}
+		additionMap["storage_generation"] = newGen
+		updatedBytes, _ := json.Marshal(additionMap)
+		storage.Addition = string(updatedBytes)
+		_ = op.UpdateStorage(c.Request.Context(), storage)
+
+		affected = append(affected, gin.H{
+			"storage_id":         storage.ID,
+			"mount_path":         storage.MountPath,
+			"storage_generation": newGen,
+		})
+	}
+
+	common.SuccessResp(c, gin.H{
+		"message":  "All WebDAV storage generations rolled over successfully",
+		"affected": affected,
+		"count":    len(affected),
+	})
 }

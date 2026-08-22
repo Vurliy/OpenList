@@ -21,6 +21,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/pkg/gowebdav"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/OpenListTeam/OpenList/v4/pkg/webdavauth"
+	log "github.com/sirupsen/logrus"
 )
 
 type WebDavTicket struct {
@@ -43,6 +44,9 @@ func (d *WebDavTicket) GetAddition() driver.Additional {
 	}
 	if d.WebDAVAuthNonce == "" {
 		d.WebDAVAuthNonce = webdavauth.DefaultAuthNonce
+	}
+	if d.StorageGeneration <= 0 {
+		d.StorageGeneration = 1
 	}
 	return &d.Addition
 }
@@ -186,7 +190,11 @@ func (d *WebDavTicket) issueTicket(ctx context.Context, ticket webdavauth.Ticket
 	ticket.Audience = d.WebDAVAuthAudience
 	ticket.UserID = user.ID
 	ticket.TokenDigest = webdavauth.TokenDigest(rawToken)
-	ticket.Generation = webdavauth.AuthGeneration
+	gen := d.StorageGeneration
+	if gen <= 0 {
+		gen = 1
+	}
+	ticket.Generation = fmt.Sprintf("%d", gen)
 	fep := webdavauth.GetGlobalFileEpoch(ticket.Path)
 	ufep := webdavauth.GetUserFileEpoch(user.ID, ticket.Path)
 	if fep > 1 {
@@ -469,3 +477,21 @@ func (d *WebDavTicket) WriteRevocationFile(name string, data []byte) error {
 	}
 	return client.Write(name, data, 0644)
 }
+
+func (d *WebDavTicket) RolloverGeneration(ctx context.Context) (int, error) {
+	if d.StorageGeneration <= 0 {
+		d.StorageGeneration = 1
+	}
+	d.StorageGeneration++
+	gen := d.StorageGeneration
+	payload := fmt.Sprintf("{\"v\":1,\"generation\":%d,\"updated_at\":%d,\"audience\":\"%s\"}\n", gen, time.Now().Unix(), d.WebDAVAuthAudience)
+	err := d.WriteRevocationFile("global-generation.json", []byte(payload))
+	if err != nil {
+		log.Warnf("[WebDavTicket] failed to write global-generation.json to %s: %v", d.WebDAVAuthAudience, err)
+	}
+	d.ticketMu.Lock()
+	d.directoryTickets = make(map[string]string)
+	d.ticketMu.Unlock()
+	return gen, err
+}
+
