@@ -210,6 +210,8 @@ func RolloverStorageGeneration(c *gin.Context) {
 	updatedBytes, _ := json.Marshal(additionMap)
 	storage.Addition = string(updatedBytes)
 	_ = op.UpdateStorage(c.Request.Context(), *storage)
+	op.Cache.DeleteDirectoryTree(driverInstance, "/")
+	op.Cache.InvalidateStorageDetails(driverInstance)
 
 	common.SuccessResp(c, gin.H{
 		"message":            "Storage generation rolled over successfully",
@@ -260,6 +262,8 @@ func RolloverAllStorageGeneration(c *gin.Context) {
 		updatedBytes, _ := json.Marshal(additionMap)
 		storage.Addition = string(updatedBytes)
 		_ = op.UpdateStorage(c.Request.Context(), storage)
+		op.Cache.DeleteDirectoryTree(driverInstance, "/")
+		op.Cache.InvalidateStorageDetails(driverInstance)
 
 		affected = append(affected, gin.H{
 			"storage_id":         storage.ID,
