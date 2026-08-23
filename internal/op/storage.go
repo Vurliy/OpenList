@@ -249,7 +249,7 @@ func UpdateStorage(ctx context.Context, storage model.Storage) error {
 		return errors.Errorf("driver cannot be changed")
 	}
 	if storage.Driver == "WebDavTicket" {
-		protectWebDavTicketGeneration(&oldStorage, &storage)
+		protectWebDavTicketGeneration(oldStorage, &storage)
 	}
 	storage.Modified = time.Now()
 	storage.MountPath = utils.FixAndCleanPath(storage.MountPath)
