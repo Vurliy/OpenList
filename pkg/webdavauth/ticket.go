@@ -3,6 +3,7 @@
 package webdavauth
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -184,10 +185,13 @@ func IssuePathBound(secret, nonce string, ticket Ticket) (string, error) {
 	if _, err := NormalizeNonce(nonce); err != nil {
 		return "", err
 	}
-	payload, err := json.Marshal(ticket)
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(ticket); err != nil {
 		return "", fmt.Errorf("marshal webdav ticket: %w", err)
 	}
+	payload := bytes.TrimRight(buf.Bytes(), "\n")
 	payloadPart := base64.RawURLEncoding.EncodeToString(payload)
 	key, err := DeriveKey(secret, nonce)
 	if err != nil {
