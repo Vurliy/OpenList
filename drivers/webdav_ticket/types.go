@@ -15,7 +15,7 @@ type Addition struct {
 	WebDAVAuthAudience      string `json:"webdav_auth_audience" required:"true" help:"ticket audience used to distinguish WebDAV services (e.g. storage-1)"`
 	WebDAVAuthNonce         string `json:"webdav_auth_nonce" type:"text" default:"fixed-v1" help:"base64url nonce shared with the WebDAV ticket verifier"`
 	WebDAVAuthScope         string `json:"webdav_auth_scope" default:"/download" help:"public WebDAV path scope for browser links"`
-	StorageGeneration       int    `json:"storage_generation" default:"1" help:"storage-level generation epoch for batch link rollover"`
+	StorageGeneration       int    `json:"storage_generation" default:"1" ignore:"true" help:"storage-level generation epoch for batch link rollover"`
 	Thumbnail               bool   `json:"thumbnail" default:"true" help:"enable WebDAV thumbnails via worker"`
 	ShowProxyPlayerButtons  bool   `json:"show_proxy_player_buttons" default:"true" help:"show OpenList backend proxy player buttons"`
 	ShowDirectPlayerButtons bool   `json:"show_direct_player_buttons" default:"true" help:"show WebDAV direct player buttons with direct badge"`
