@@ -155,7 +155,7 @@ func (d *WebDavTicket) Link(ctx context.Context, file model.Obj, args model.Link
 		header.Set("Authorization", auth)
 	}
 	if args.Redirect || d.DirectMode == "direct" {
-		url, err = d.withWebDAVTicket(ctx, url)
+		signedURL, err := d.withWebDAVTicket(ctx, url)
 		if err != nil {
 			if ctx.Value(conf.TokenKey) == nil {
 				return &model.Link{
@@ -165,6 +165,7 @@ func (d *WebDavTicket) Link(ctx context.Context, file model.Obj, args model.Link
 			}
 			return nil, err
 		}
+		url = signedURL
 	}
 	return &model.Link{
 		URL:    url,
