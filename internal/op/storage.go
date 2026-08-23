@@ -1,6 +1,7 @@
 package op
 
 import (
+	"encoding/json"
 	"context"
 	"fmt"
 	"reflect"
@@ -221,6 +222,24 @@ func DisableStorage(ctx context.Context, id uint) error {
 // UpdateStorage update storage
 // get old storage first
 // drop the storage then reinitialize
+func protectWebDavTicketGeneration(oldStorage, newStorage *model.Storage) {
+	var oldAdd, newAdd map[string]any
+	if err := json.Unmarshal([]byte(oldStorage.Addition), &oldAdd); err != nil {
+		return
+	}
+	if err := json.Unmarshal([]byte(newStorage.Addition), &newAdd); err != nil {
+		return
+	}
+	oldGen, _ := oldAdd["storage_generation"].(float64)
+	newGen, _ := newAdd["storage_generation"].(float64)
+	if oldGen > newGen {
+		newAdd["storage_generation"] = int(oldGen)
+		if bytes, err := json.Marshal(newAdd); err == nil {
+			newStorage.Addition = string(bytes)
+		}
+	}
+}
+
 func UpdateStorage(ctx context.Context, storage model.Storage) error {
 	oldStorage, err := db.GetStorageById(storage.ID)
 	if err != nil {
@@ -228,6 +247,9 @@ func UpdateStorage(ctx context.Context, storage model.Storage) error {
 	}
 	if oldStorage.Driver != storage.Driver {
 		return errors.Errorf("driver cannot be changed")
+	}
+	if storage.Driver == "WebDavTicket" {
+		protectWebDavTicketGeneration(&oldStorage, &storage)
 	}
 	storage.Modified = time.Now()
 	storage.MountPath = utils.FixAndCleanPath(storage.MountPath)
