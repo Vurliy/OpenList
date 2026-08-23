@@ -1,4 +1,4 @@
-﻿package webdav_ticket
+package webdav_ticket
 
 import (
 		"context"
@@ -196,16 +196,34 @@ func (d *WebDavTicket) issueTicket(ctx context.Context, ticket webdavauth.Ticket
 		gen = 1
 	}
 	ticket.Generation = fmt.Sprintf("%d", gen)
-	fep := webdavauth.GetGlobalFileEpoch(ticket.Path)
-	ufep := webdavauth.GetUserFileEpoch(user.ID, ticket.Path)
-	if fep > 1 {
-		ticket.FileEpoch = fep
+	if ticket.Mode == "" {
+		if d.DirectMode == "direct" {
+			ticket.Mode = webdavauth.TicketModeDirect
+		} else {
+			ticket.Mode = webdavauth.TicketModeCookie
+		}
 	}
-	if ufep > 1 {
-		ticket.UserFileEpoch = ufep
+
+	if ticket.Mode == webdavauth.TicketModeDirect {
+		fep := webdavauth.GetGlobalFileEpoch(ticket.Path)
+		ufep := webdavauth.GetUserFileEpoch(user.ID, ticket.Path)
+		if fep > 1 {
+			ticket.FileEpoch = fep
+		}
+		if ufep > 1 {
+			ticket.UserFileEpoch = ufep
+		}
+		if ticket.ExpiresAt == 0 {
+			ticket.ExpiresAt = time.Now().Add(4 * time.Hour).Unix()
+		}
+	} else {
+		ticket.ExpiresAt = 0
+		ticket.FileEpoch = 0
+		ticket.UserFileEpoch = 0
 	}
+
 	if ticket.Type == webdavauth.TicketTypeDirectory {
-		key := fmt.Sprintf("%s|%s|%d|%s|%s|%t|%s", ticket.Type, ticket.Audience,
+		key := fmt.Sprintf("%s|%s|%s|%d|%s|%s|%t|%s", ticket.Type, ticket.Mode, ticket.Audience,
 			ticket.UserID, ticket.TokenDigest, ticket.Scope, ticket.Recursive, ticket.Generation)
 		d.ticketMu.RLock()
 		cached := d.directoryTickets[key]

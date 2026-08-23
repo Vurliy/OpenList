@@ -17,23 +17,27 @@ import (
 )
 
 const (
-	TicketVersion        = 4
+	TicketVersion        = 5
 	QueryParameter       = "ticket"
 	AuthGeneration       = "fixed-v1"
 	GrantVersion         = 4
 	GrantTypeSessionBind = "session_bind"
 	TicketTypeFile       = "file"
 	TicketTypeDirectory  = "directory"
+	TicketModeCookie     = "cookie"
+	TicketModeDirect     = "direct"
 	// DefaultAuthNonce is only a compatibility value for old storage records.
 	// Production storage records should set webdav_auth_nonce explicitly.
 	DefaultAuthNonce = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 )
 
-// Ticket is the deterministic v4 payload. File tickets bind one resource to
+// Ticket is the deterministic payload. File tickets bind one resource to
 // Path; directory tickets bind a whole directory scope and leave Path empty so
-// every thumbnail in that directory can reuse one ticket.
+// every thumbnail in that directory can reuse one ticket. Mode explicitly
+// differentiates cookie-session capabilities from stateless direct links.
 type Ticket struct {
 	Version       int    `json:"v"`
+	Mode          string `json:"mode"`
 	Type          string `json:"type"`
 	Audience      string `json:"aud"`
 	UserID        uint   `json:"uid"`
@@ -46,7 +50,7 @@ type Ticket struct {
 	UserFileEpoch int    `json:"ufep,omitempty"`
 	ExpiresAt     int64  `json:"exp,omitempty"`
 	// Deprecated v1 fields are kept only so older callers can be migrated
-	// without a source-level break. v4 issuance and verification ignore them.
+	// without a source-level break. issuance and verification ignore them.
 	Username string `json:"-"`
 	IssuedAt int64  `json:"-"`
 	Nonce    string `json:"-"`
@@ -156,6 +160,16 @@ func IssuePathBound(secret, nonce string, ticket Ticket) (string, error) {
 	if (ticket.Version != 4 && ticket.Version != 5) || ticket.Audience == "" || ticket.TokenDigest == "" || ticket.Scope == "" {
 		return "", errors.New("invalid webdav ticket claims")
 	}
+	if ticket.Mode == "" {
+		if ticket.ExpiresAt > 0 {
+			ticket.Mode = TicketModeDirect
+		} else {
+			ticket.Mode = TicketModeCookie
+		}
+	}
+	if ticket.Mode != TicketModeCookie && ticket.Mode != TicketModeDirect {
+		return "", errors.New("invalid webdav ticket mode")
+	}
 	if ticket.Type == "" {
 		ticket.Type = TicketTypeFile
 	}
@@ -222,6 +236,16 @@ func VerifyPathBound(secret, nonce, token, publicPath string) (Ticket, error) {
 	if err := json.Unmarshal(payload, &ticket); err != nil || (ticket.Version != 4 && ticket.Version != 5) ||
 		ticket.Type == "" || ticket.Audience == "" || ticket.TokenDigest == "" || ticket.Scope == "" {
 		return ticket, errors.New("invalid webdav ticket claims")
+	}
+	if ticket.Mode == "" {
+		if ticket.ExpiresAt > 0 {
+			ticket.Mode = TicketModeDirect
+		} else {
+			ticket.Mode = TicketModeCookie
+		}
+	}
+	if ticket.Mode != TicketModeCookie && ticket.Mode != TicketModeDirect {
+		return ticket, errors.New("invalid webdav ticket mode")
 	}
 	if ticket.Type != TicketTypeFile && ticket.Type != TicketTypeDirectory {
 		return ticket, errors.New("invalid webdav ticket type")
