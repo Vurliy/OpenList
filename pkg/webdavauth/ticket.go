@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"fmt"
 	"path"
 	"strings"
@@ -109,6 +110,9 @@ func NormalizeNonce(value string) (string, error) {
 // CanonicalPath normalizes the public URL path and rejects traversal. The
 // external WebDAV path, not the provider's private filesystem path, is signed.
 func CanonicalPath(value string) (string, error) {
+	if unescaped, err := url.PathUnescape(value); err == nil {
+		value = unescaped
+	}
 	if value == "" || !strings.HasPrefix(value, "/") || strings.ContainsRune(value, '\x00') || strings.Contains(value, "\\") {
 		return "", errors.New("invalid webdav public path")
 	}

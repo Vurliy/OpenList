@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -265,6 +266,36 @@ func (d *WebDavTicket) withWebDAVTicket(ctx context.Context, rawURL string) (str
 		Type:  webdavauth.TicketTypeFile,
 		Path:  publicPath,
 		Scope: d.WebDAVAuthScope,
+	})
+	if err != nil {
+		return "", err
+	}
+	query := u.Query()
+	query.Set(webdavauth.QueryParameter, ticket)
+	u.RawQuery = query.Encode()
+	return u.String(), nil
+}
+
+func (d *WebDavTicket) IssueDirectPlayerTicket(ctx context.Context, filePath string) (string, error) {
+	fullPath := "/" + strings.Trim(path.Join("/", d.GetRootPath(), filePath), "/")
+	linkURL, _, err := d.client.Link(fullPath)
+	if err != nil {
+		return "", err
+	}
+	u, err := url.Parse(linkURL)
+	if err != nil {
+		return "", err
+	}
+	publicPath, err := webdavauth.CanonicalPath(u.Path)
+	if err != nil {
+		return "", fmt.Errorf("cannot issue webdav direct ticket without a public URL path: %w", err)
+	}
+	ticket, err := d.issueTicket(ctx, webdavauth.Ticket{
+		Mode:      webdavauth.TicketModeDirect,
+		Type:      webdavauth.TicketTypeFile,
+		Path:      publicPath,
+		Scope:     d.WebDAVAuthScope,
+		ExpiresAt: time.Now().Add(4 * time.Hour).Unix(),
 	})
 	if err != nil {
 		return "", err

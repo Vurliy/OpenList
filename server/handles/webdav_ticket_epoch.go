@@ -25,6 +25,70 @@ type RevokeTicketReq struct {
 	Path string `json:"path" binding:"required"`
 }
 
+type DirectLinkReq struct {
+	Path     string `json:"path" binding:"required"`
+	Password string `json:"password"`
+}
+
+type DirectLinkIssuer interface {
+	IssueDirectPlayerTicket(ctx context.Context, reqPath string) (string, error)
+}
+
+func GetWebDAVDirectLink(c *gin.Context) {
+	user := getUserFromCtx(c)
+	if user == nil || user.IsGuest() {
+		common.ErrorStrResp(c, "Login required", 401)
+		return
+	}
+	var req DirectLinkReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		common.ErrorResp(c, err, 400)
+		return
+	}
+	reqPath, err := user.JoinPath(req.Path)
+	if err != nil {
+		common.ErrorResp(c, err, 403)
+		return
+	}
+
+	storageDriver, actualPath, err := op.GetStorageAndActualPath(reqPath)
+	if err != nil || storageDriver == nil {
+		common.ErrorStrResp(c, "Storage driver not found", 404)
+		return
+	}
+
+	meta, _ := op.GetNearestMeta(reqPath)
+	if !common.CanAccess(user, meta, reqPath, req.Password) {
+		common.ErrorStrResp(c, "Permission denied", 403)
+		return
+	}
+
+	issuer, ok := storageDriver.(DirectLinkIssuer)
+	if !ok {
+		// Fallback to standard Link if not a WebDavTicket driver
+		link, _, err := fs.Link(c.Request.Context(), reqPath, model.LinkArgs{Redirect: true})
+		if err != nil {
+			common.ErrorResp(c, err, 500)
+			return
+		}
+		defer link.Close()
+		common.SuccessResp(c, gin.H{
+			"url": link.URL,
+		})
+		return
+	}
+
+	directURL, err := issuer.IssueDirectPlayerTicket(c.Request.Context(), actualPath)
+	if err != nil {
+		common.ErrorStrResp(c, fmt.Sprintf("Failed to issue direct ticket: %v", err), 500)
+		return
+	}
+
+	common.SuccessResp(c, gin.H{
+		"url": directURL,
+	})
+}
+
 func SyncEpochToWebDAV(d driver.Driver, filename string, epoch int) error {
 	type Syncer interface {
 		WriteRevocationFile(name string, data []byte) error

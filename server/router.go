@@ -82,6 +82,7 @@ func Init(e *gin.Engine) {
 	auth.POST("/auth/2fa/generate", handles.Generate2FA)
 	auth.POST("/auth/2fa/verify", handles.Verify2FA)
 	auth.POST("/webdav/ticket/revoke", handles.RevokeUserFileTicket)
+	auth.POST("/webdav/ticket/direct_link", handles.GetWebDAVDirectLink)
 	auth.GET("/auth/logout", handles.LogOut)
 	auth.POST("/webdav/authorize", handles.AuthorizeWebDAV)
 	auth.POST("/webdav/revoke", handles.RevokeWebDAV)
