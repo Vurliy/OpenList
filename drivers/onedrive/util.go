@@ -100,6 +100,7 @@ func (d *Onedrive) _refreshToken() error {
 		}
 		d.AccessToken = resp.AccessToken
 		d.RefreshToken = resp.RefreshToken
+		d.LastTokenRefresh = time.Now().Unix()
 		op.MustSaveDriverStorage(d)
 		return nil
 	}
@@ -128,6 +129,7 @@ func (d *Onedrive) _refreshToken() error {
 		return errs.EmptyToken
 	}
 	d.RefreshToken, d.AccessToken = resp.RefreshToken, resp.AccessToken
+	d.LastTokenRefresh = time.Now().Unix()
 	op.MustSaveDriverStorage(d)
 	return nil
 }

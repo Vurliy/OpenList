@@ -84,6 +84,7 @@ func (d *OnedriveAPP) _accessToken() error {
 		return errs.EmptyToken
 	}
 	d.AccessToken = resp.AccessToken
+	d.LastTokenRefresh = time.Now().Unix()
 	op.MustSaveDriverStorage(d)
 	return nil
 }
