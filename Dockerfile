@@ -5,6 +5,9 @@ ARG USE_LOCAL_FRONTEND=false
 FROM alpine:edge AS builder
 LABEL stage=go-builder
 ARG USE_LOCAL_FRONTEND=false
+ARG BUILD_GIT_COMMIT
+ARG BUILD_VERSION
+ARG BUILD_WEB_VERSION
 WORKDIR /app/
 RUN apk add --no-cache bash curl jq gcc git go musl-dev
 COPY go.mod go.sum ./
@@ -19,6 +22,10 @@ ARG INSTALL_ARIA2=false
 ARG USER=openlist
 ARG UID=1001
 ARG GID=1001
+ARG BUILD_GIT_COMMIT
+ARG BUILD_VERSION
+LABEL org.opencontainers.image.revision="${BUILD_GIT_COMMIT}" \
+      org.opencontainers.image.version="${BUILD_VERSION}"
 
 WORKDIR /opt/openlist/
 

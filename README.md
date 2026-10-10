@@ -30,3 +30,26 @@ git rebase origin/main
 # 编译与构建
 # 遵循《生产与编译隔离原则》，ARM 镜像统一在 work-de-arm-1 上构建，X86 镜像在 intranet-master-1 上构建
 ```
+
+### 已合入 PR #2950 修复后的镜像发布
+
+生产主程序位于 `work-jp-arm-1`；storage 服务器运行的是 WebDAV 服务，不在其上构建或新增 OpenList 容器。
+长任务使用当前 Agent UUID 的专属 tmux。只在专用编译机运行下列 Dockerfile 构建，生产机仅加载镜像并重建原服务：
+
+```bash
+docker build --pull=false --build-arg BASE_IMAGE_TAG=ffmpeg \
+  --build-arg USE_LOCAL_FRONTEND=true \
+  --build-arg BUILD_GIT_COMMIT=<完整后端提交号> \
+  --build-arg BUILD_VERSION=<后端版本号> \
+  --build-arg BUILD_WEB_VERSION=<随包前端版本号> \
+  -t openlist:<发布标识>-<架构> .
+```
+
+构建上下文使用已提交的后端源码和明确选定的 `public/dist`，不携带 `.git`、生产配置、数据库或凭据。
+上述版本参数用于源码归档不含 Git 元数据时的二进制版本注入；运行镜像同时记录 OCI revision/version 标签。
+前端资源未变更时复用已发布定制资源，不在后端修复发布中顺带更新前端。
+
+镜像导出后核对 SHA256，归档到学习项目 `packaged/images/`；ARM 镜像取回后立即经 OCI SDK
+执行 `SOFTSTOP` 并确认 `STOPPED`，然后再开展生产发布。生产发布先备份原 Compose 文件和数据库，
+保留旧镜像用于回滚；只修改原 OpenList 服务的镜像引用，保持卷、端口和运行参数不变。
+部署后核对二进制提交号、容器状态、磁盘/目录容量和 WebDAV 预览，不能只凭首页 HTTP 200 判定完整验收通过。
