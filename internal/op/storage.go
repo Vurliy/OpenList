@@ -15,7 +15,6 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/pkg/generic_sync"
-	"github.com/OpenListTeam/OpenList/v4/pkg/singleflight"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
@@ -96,6 +95,7 @@ func getCurrentGoroutineStack() string {
 
 // initStorage initialize the driver and store to storagesMap
 func initStorage(ctx context.Context, storage model.Storage, storageDriver driver.Driver) (err error) {
+	defer beginStorageDetailsChange(storage.MountPath)()
 	storageDriver.SetStorage(storage)
 	driverStorage := storageDriver.GetStorage()
 	defer func() {
@@ -200,6 +200,7 @@ func DisableStorage(ctx context.Context, id uint) error {
 	if err != nil {
 		return errors.WithMessage(err, "failed get storage driver")
 	}
+	defer beginStorageDetailsChange(storage.MountPath)()
 	// drop the storage in the driver
 	if err := storageDriver.Drop(ctx); err != nil {
 		return errors.Wrap(err, "failed drop storage")
@@ -243,7 +244,7 @@ func UpdateStorage(ctx context.Context, storage model.Storage) error {
 	// Storage settings may change which objects are exposed at the same mount
 	// path, so cached entries must be discarded before reinitializing the driver.
 	Cache.DeleteDirectoryTree(storageDriver, "/")
-	Cache.InvalidateStorageDetails(storageDriver)
+	defer beginStorageDetailsChange(oldStorage.MountPath, storage.MountPath)()
 	if oldStorage.MountPath != storage.MountPath {
 		// mount path renamed, need to drop the storage
 		storagesMap.Delete(oldStorage.MountPath)
@@ -270,6 +271,7 @@ func DeleteStorageById(ctx context.Context, id uint) error {
 		if err != nil {
 			return errors.WithMessage(err, "failed get storage driver")
 		}
+		defer beginStorageDetailsChange(storage.MountPath)()
 		// drop the storage in the driver
 		if err := storageDriver.Drop(ctx); err != nil {
 			dropErr = errors.Wrapf(err, "failed drop storage")
@@ -277,7 +279,6 @@ func DeleteStorageById(ctx context.Context, id uint) error {
 		// delete the storage in the memory
 		storagesMap.Delete(storage.MountPath)
 		Cache.DeleteDirectoryTree(storageDriver, "/")
-		Cache.InvalidateStorageDetails(storageDriver)
 		go callStorageHooks("del", storageDriver)
 	}
 	// delete the storage in the database
@@ -463,30 +464,4 @@ func GetBalancedStorage(path string) driver.Driver {
 		balanceMap.Store(virtualPath, i)
 		return storages[i]
 	}
-}
-
-var detailsG singleflight.Group[*model.StorageDetails]
-
-func GetStorageDetails(ctx context.Context, storage driver.Driver, refresh ...bool) (*model.StorageDetails, error) {
-	if storage.Config().CheckStatus && storage.GetStorage().Status != WORK {
-		return nil, errors.WithMessagef(errs.StorageNotInit, "storage status: %s", storage.GetStorage().Status)
-	}
-	wd, ok := storage.(driver.WithDetails)
-	if !ok {
-		return nil, errs.NotImplement
-	}
-	if !utils.IsBool(refresh...) {
-		if ret, ok := Cache.GetStorageDetails(storage); ok {
-			return ret, nil
-		}
-	}
-	details, err, _ := detailsG.Do(storage.GetStorage().MountPath, func() (*model.StorageDetails, error) {
-		ret, err := wd.GetDetails(ctx)
-		if err != nil {
-			return nil, err
-		}
-		Cache.SetStorageDetails(storage, ret)
-		return ret, nil
-	})
-	return details, err
 }
