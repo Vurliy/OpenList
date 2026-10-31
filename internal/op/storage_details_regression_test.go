@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -527,7 +528,7 @@ func TestStorageDetailsSettingsAreClamped(t *testing.T) {
 	}
 }
 
-func TestGetStorageDetailsAbandonsProbeIgnoringDeadline(t *testing.T) {
+func TestGetStorageDetailsProbeIgnoringDeadlineDoesNotWedgeRefresh(t *testing.T) {
 	d := newDetailsTestDriver(t, 1000)
 	setDetailsTestSetting(t, conf.StorageDetailsTimeoutSeconds, "1")
 	hang := make(chan struct{})
@@ -545,8 +546,14 @@ func TestGetStorageDetailsAbandonsProbeIgnoringDeadline(t *testing.T) {
 	if _, err := GetStorageDetails(context.Background(), d, true); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("hung probe: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed > time.Second+detailsWaitGrace+time.Second {
-		t.Fatalf("caller waited %s", elapsed)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("caller waited %s for a driver that ignores its deadline", elapsed)
+	}
+	detailsLock.Lock()
+	refreshing := detailsStates[d.MountPath].refreshing
+	detailsLock.Unlock()
+	if refreshing {
+		t.Fatal("hung driver left the refresh barrier closed")
 	}
 	hung.Store(false)
 	val, err := GetStorageDetails(context.Background(), d, true)
@@ -555,20 +562,20 @@ func TestGetStorageDetailsAbandonsProbeIgnoringDeadline(t *testing.T) {
 	}
 }
 
-func TestDisableStorageFailureKeepsDriverWorking(t *testing.T) {
+func TestDisableStorageFailureIsNotReportedAsDisabled(t *testing.T) {
 	d := newLifecycleDetailsTestDriver(t)
 	d.dropHook = func(context.Context) error { return errors.New("drop failed") }
 	if err := DisableStorage(context.Background(), d.ID); err == nil {
 		t.Fatal("expected drop failure")
 	}
-	if d.GetStorage().Status != WORK {
-		t.Fatalf("failed disable changed status to %q", d.GetStorage().Status)
+	if status := d.GetStorage().Status; status == DISABLED || !strings.Contains(status, "drop failed") {
+		t.Fatalf("failed disable reported status %q", status)
 	}
 	if registered, ok := storagesMap.Load(d.MountPath); !ok || registered != d {
 		t.Fatal("failed disable unmounted the driver")
 	}
-	if val, err := GetStorageDetails(context.Background(), d); err != nil || val.TotalSpace != 1000 {
-		t.Fatalf("details after failed disable: %v, %v", val, err)
+	if row, err := db.GetStorageById(d.ID); err != nil || row.Disabled {
+		t.Fatalf("failed disable changed database: %+v, %v", row, err)
 	}
 	d.dropHook = nil
 	if err := DisableStorage(context.Background(), d.ID); err != nil {
@@ -888,5 +895,46 @@ func TestGetStorageDetailsRepeatedDisableEnableAndDeleteDoesNotRetainDrivers(t *
 		if _, err := GetStorageDetails(context.Background(), old); !errors.Is(err, errs.StorageNotInit) {
 			t.Fatalf("retired driver %d was admitted after delete: %v", idx, err)
 		}
+	}
+}
+
+func TestUpdateStorageDropFailureRollsBack(t *testing.T) {
+	for _, rename := range []bool{false, true} {
+		t.Run(fmt.Sprint(rename), func(t *testing.T) {
+			d := newLifecycleDetailsTestDriver(t)
+			oldPath, oldAddition := d.MountPath, d.Addition
+			d.dropHook = func(context.Context) error { return errors.New("drop failed") }
+			updated := d.Storage
+			updated.Addition = `{"total":2000}`
+			if rename {
+				updated.MountPath += "-renamed"
+			}
+			if err := UpdateStorage(context.Background(), updated); err == nil {
+				t.Fatal("expected drop failure")
+			}
+			row, err := db.GetStorageById(d.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row.MountPath != oldPath || row.Addition != oldAddition {
+				t.Fatalf("database not rolled back: %s %s", row.MountPath, row.Addition)
+			}
+			if registered, ok := storagesMap.Load(oldPath); !ok || registered != d {
+				t.Fatal("driver unmounted after failed drop")
+			}
+			if status := d.GetStorage().Status; !strings.Contains(status, "drop failed") {
+				t.Fatalf("failed update reported status %q", status)
+			}
+			if _, err := GetStorageDetails(context.Background(), d, true); !errors.Is(err, errs.StorageNotInit) {
+				t.Fatalf("half-dropped driver was queryable: %v", err)
+			}
+			d.dropHook = nil
+			if err := UpdateStorage(context.Background(), updated); err != nil {
+				t.Fatal(err)
+			}
+			if val, err := GetStorageDetails(context.Background(), d); err != nil || val.TotalSpace != 2000 {
+				t.Fatalf("retry capacity: %v, %v", val, err)
+			}
+		})
 	}
 }

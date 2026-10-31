@@ -218,26 +218,36 @@ func DisableStorage(ctx context.Context, id uint) error {
 	if err != nil {
 		return err
 	}
-	// Only a completed disable retires the driver. If Drop or the database
-	// update fails the storage stays mounted and enabled, so its in-memory
-	// status must not be flipped to DISABLED.
-	retired := false
-	defer func() { finishStorageDetailsChange(storageDriver, change, !retired) }()
+	defer finishStorageDetailsChange(storageDriver, change, false)
 	// drop the storage in the driver
 	if err := storageDriver.Drop(ctx); err != nil {
-		return errors.Wrap(err, "failed drop storage")
+		err = errors.Wrap(err, "failed drop storage")
+		// The storage stays mounted and enabled, so report the failure
+		// instead of letting it look DISABLED.
+		markStorageChangeFailed(storageDriver, err)
+		return err
 	}
 	// delete the storage in the memory
 	storage.Disabled = true
 	storage.SetStatus(DISABLED)
 	err = db.UpdateStorage(storage)
 	if err != nil {
-		return errors.WithMessage(err, "failed update storage in db")
+		err = errors.WithMessage(err, "failed update storage in db")
+		markStorageChangeFailed(storageDriver, err)
+		return err
 	}
 	storagesMap.Delete(storage.MountPath)
-	retired = true
+	storageDriver.GetStorage().SetStatus(DISABLED)
 	go callStorageHooks("del", storageDriver)
 	return nil
+}
+
+// markStorageChangeFailed records a failed lifecycle change as the driver's
+// status, so the storage reads as failed rather than WORK or DISABLED.
+func markStorageChangeFailed(storageDriver driver.Driver, err error) {
+	if meta := storageDriver.GetStorage(); meta != nil {
+		meta.SetStatus(err.Error())
+	}
 }
 
 // UpdateStorage update storage
@@ -274,13 +284,21 @@ func UpdateStorage(ctx context.Context, storage model.Storage) error {
 	// Storage settings may change which objects are exposed at the same mount
 	// path, so cached entries must be discarded before reinitializing the driver.
 	Cache.DeleteDirectoryTree(storageDriver, "/")
-	if oldStorage.MountPath != storage.MountPath {
-		// mount path renamed, need to drop the storage
-		storagesMap.Delete(oldStorage.MountPath)
-	}
 	err = storageDriver.Drop(ctx)
 	if err != nil {
-		return errors.Wrapf(err, "failed drop storage")
+		err = errors.Wrapf(err, "failed drop storage")
+		// The driver still holds the old settings at the old mount path. Keep
+		// it registered there, restore the old row so a retry starts from a
+		// consistent state, and report the failure as its status.
+		if rollbackErr := db.UpdateStorage(oldStorage); rollbackErr != nil {
+			log.Errorf("failed to roll back storage %d after drop failure: %+v", oldStorage.ID, rollbackErr)
+		}
+		markStorageChangeFailed(storageDriver, err)
+		return err
+	}
+	if oldStorage.MountPath != storage.MountPath {
+		// mount path renamed, the driver is re-registered by initializeStorage
+		storagesMap.Delete(oldStorage.MountPath)
 	}
 
 	err = initializeStorage(ctx, storage, storageDriver)
@@ -408,6 +426,7 @@ func GetStorageVirtualFilesWithDetailsByPath(ctx context.Context, prefix string,
 			defer func() {
 				if r := recover(); r != nil {
 					log.Errorf("panic recovered in storage details probe for %s: %v", dri.GetStorage().MountPath, r)
+					resultChan <- nil
 				}
 			}()
 			details, err := GetStorageDetails(ctx, dri, refresh)

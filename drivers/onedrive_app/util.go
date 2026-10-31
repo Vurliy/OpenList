@@ -109,7 +109,8 @@ func (d *OnedriveAPP) Request(url string, method string, callback base.ReqCallba
 			if err != nil {
 				return nil, err
 			}
-			return d.Request(url, method, callback, resp)
+			// retry once with the refreshed token; never loop on a bad token
+			return d.Request(url, method, callback, resp, true)
 		}
 		return nil, errors.New(e.Error.Message)
 	}
