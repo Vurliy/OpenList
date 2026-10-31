@@ -16,11 +16,27 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const lastDoneExpireThreshold = 86400
+const (
+	// detailsStateIdleTTL is how long an idle per-mount state is retained.
+	detailsStateIdleTTL = int64(86400)
+	// detailsStatePruneInterval throttles the O(n) prune of detailsStates.
+	detailsStatePruneInterval = int64(3600)
+
+	defaultStorageDetailsTimeoutSec = 15
+	maxStorageDetailsTimeoutSec     = 600
+	maxStorageDetailsCooldownSec    = int(detailsStateIdleTTL)
+	// detailsWaitGrace is how long a caller waits beyond the probe timeout
+	// before it abandons a flight whose driver ignores context cancellation.
+	detailsWaitGrace = 2 * time.Second
+)
 
 type storageDetailsState struct {
+	// generation is drawn from the global detailsGenSeq, so it is unique for
+	// the process lifetime. A state can therefore be pruned and recreated
+	// without a late probe of the old state ever matching the new one.
 	generation uint64
 	lastDone   int64
+	updated    int64
 	refreshing bool
 }
 
@@ -37,12 +53,22 @@ var (
 	detailsLock    sync.Mutex
 	detailsStates  = make(map[string]*storageDetailsState)
 	detailsChanges = make(map[driver.Driver]*storageDetailsChange)
+	detailsGenSeq  uint64
+	detailsPruned  int64
 )
+
+func nextStorageDetailsGenerationLocked() uint64 {
+	detailsGenSeq++
+	return detailsGenSeq
+}
 
 func storageDetailsStateLocked(key string) *storageDetailsState {
 	state := detailsStates[key]
 	if state == nil {
-		state = &storageDetailsState{}
+		state = &storageDetailsState{
+			generation: nextStorageDetailsGenerationLocked(),
+			updated:    time.Now().Unix(),
+		}
 		detailsStates[key] = state
 	}
 	return state
@@ -50,27 +76,82 @@ func storageDetailsStateLocked(key string) *storageDetailsState {
 
 func invalidateStorageDetailsLocked(key string) {
 	state := storageDetailsStateLocked(key)
-	state.generation++
+	state.generation = nextStorageDetailsGenerationLocked()
 	state.lastDone = 0
 	state.refreshing = false
+	state.updated = time.Now().Unix()
 	Cache.detailCache.Delete(key)
 }
 
-// Invalidation preserves the generation even for a deleted mount, so a late
-// generation-zero probe cannot resurrect its cache or cooldown.
+// InvalidateStorageDetailsState drops cached capacity and supersedes any
+// in-flight probe for mountPath.
 func InvalidateStorageDetailsState(mountPath string) {
 	detailsLock.Lock()
 	defer detailsLock.Unlock()
 	invalidateStorageDetailsLocked(utils.FixAndCleanPath(mountPath))
-	cleanExpiredLastDoneTimesLocked(time.Now().Unix())
+	maybePruneStorageDetailsStatesLocked(time.Now().Unix())
 }
 
-func cleanExpiredLastDoneTimesLocked(now int64) {
-	for _, state := range detailsStates {
-		if now-state.lastDone > lastDoneExpireThreshold {
-			state.lastDone = 0
+func maybePruneStorageDetailsStatesLocked(now int64) {
+	if now-detailsPruned < detailsStatePruneInterval {
+		return
+	}
+	detailsPruned = now
+	pruneStorageDetailsStatesLocked(now)
+}
+
+// pruneStorageDetailsStatesLocked deletes states that have been idle for
+// detailsStateIdleTTL. Active refreshes and mounts under an active change are
+// kept. Deletion is safe because generations are globally unique.
+func pruneStorageDetailsStatesLocked(now int64) {
+	changing := make(map[string]struct{})
+	for _, change := range detailsChanges {
+		for _, key := range change.paths {
+			changing[key] = struct{}{}
 		}
 	}
+	for key, state := range detailsStates {
+		if state.refreshing || now-state.updated <= detailsStateIdleTTL {
+			continue
+		}
+		if _, ok := changing[key]; ok {
+			continue
+		}
+		delete(detailsStates, key)
+	}
+}
+
+// abandonStorageDetailsFlight supersedes a flight that outlived its
+// deadline (a driver that ignores context cancellation), so later callers
+// start a fresh probe instead of queueing behind a hung one. Cooldown is kept.
+func abandonStorageDetailsFlight(snapshot storageDetailsSnapshot) {
+	detailsLock.Lock()
+	defer detailsLock.Unlock()
+	state := detailsStates[snapshot.key]
+	if state == nil || state.generation != snapshot.generation {
+		return
+	}
+	log.Warnf("abandoning storage details probe for %s: driver did not honor its deadline", snapshot.key)
+	state.generation = nextStorageDetailsGenerationLocked()
+	state.refreshing = false
+	state.updated = time.Now().Unix()
+}
+
+// storageDetailsSettings reads and clamps the cooldown and timeout settings.
+func storageDetailsSettings() (cooldownSec int, timeout time.Duration) {
+	cooldownSec = GetSettingInt(conf.StorageDetailsCooldownSeconds, 0)
+	if cooldownSec < 0 {
+		cooldownSec = 0
+	} else if cooldownSec > maxStorageDetailsCooldownSec {
+		cooldownSec = maxStorageDetailsCooldownSec
+	}
+	timeoutSec := GetSettingInt(conf.StorageDetailsTimeoutSeconds, defaultStorageDetailsTimeoutSec)
+	if timeoutSec <= 0 {
+		timeoutSec = defaultStorageDetailsTimeoutSec
+	} else if timeoutSec > maxStorageDetailsTimeoutSec {
+		timeoutSec = maxStorageDetailsTimeoutSec
+	}
+	return cooldownSec, time.Duration(timeoutSec) * time.Second
 }
 
 func beginStorageDetailsChange(storage driver.Driver, paths ...string) (*storageDetailsChange, error) {
@@ -121,10 +202,15 @@ type storageDetailsSnapshot struct {
 // caller can reserve a generation and register its flight after a later one
 // has already completed. The driver call itself never holds detailsLock.
 func prepareStorageDetails(ctx context.Context, storage driver.Driver, refresh bool, cooldownSec int, timeout time.Duration) (<-chan singleflight.Result[*model.StorageDetails], *model.StorageDetails, error) {
+	result, cached, _, err := prepareStorageDetailsFlight(ctx, storage, refresh, cooldownSec, timeout)
+	return result, cached, err
+}
+
+func prepareStorageDetailsFlight(ctx context.Context, storage driver.Driver, refresh bool, cooldownSec int, timeout time.Duration) (<-chan singleflight.Result[*model.StorageDetails], *model.StorageDetails, storageDetailsSnapshot, error) {
 	detailsLock.Lock()
 	defer detailsLock.Unlock()
 	if detailsChanges[storage] != nil {
-		return nil, nil, errors.WithMessage(errs.StorageNotInit, "storage details unavailable during or after an unsuccessful storage change")
+		return nil, nil, storageDetailsSnapshot{}, errors.WithMessage(errs.StorageNotInit, "storage details unavailable during or after an unsuccessful storage change")
 	}
 	config := storage.Config()
 	meta := storage.GetStorage()
@@ -133,11 +219,11 @@ func prepareStorageDetails(ctx context.Context, storage driver.Driver, refresh b
 		if meta != nil {
 			status = meta.Status
 		}
-		return nil, nil, errors.WithMessagef(errs.StorageNotInit, "storage status: %s", status)
+		return nil, nil, storageDetailsSnapshot{}, errors.WithMessagef(errs.StorageNotInit, "storage status: %s", status)
 	}
 	wd, ok := storage.(driver.WithDetails)
 	if !ok {
-		return nil, nil, errs.NotImplement
+		return nil, nil, storageDetailsSnapshot{}, errs.NotImplement
 	}
 	snapshot := storageDetailsSnapshot{
 		key:   utils.FixAndCleanPath(meta.MountPath),
@@ -145,21 +231,21 @@ func prepareStorageDetails(ctx context.Context, storage driver.Driver, refresh b
 		cache: !config.NoCache,
 	}
 	if registered, ok := storagesMap.Load(snapshot.key); ok && registered != storage {
-		return nil, nil, errors.WithMessage(errs.StorageNotInit, "storage driver has been replaced")
+		return nil, nil, storageDetailsSnapshot{}, errors.WithMessage(errs.StorageNotInit, "storage driver has been replaced")
 	}
 	state := storageDetailsStateLocked(snapshot.key)
 	if refresh && !state.refreshing && (cooldownSec <= 0 || time.Now().Unix()-state.lastDone >= int64(cooldownSec)) {
 		invalidateStorageDetailsLocked(snapshot.key)
 		state.refreshing = true
 	} else if cached, exists := Cache.detailCache.Get(snapshot.key); exists && snapshot.cache {
-		return nil, cached, nil
+		return nil, cached, snapshot, nil
 	}
 	snapshot.generation = state.generation
 	flightKey := fmt.Sprintf("%s:%d", snapshot.key, snapshot.generation)
 	result := detailsG.DoChan(flightKey, func() (*model.StorageDetails, error) {
 		return probeStorageDetails(ctx, wd, snapshot, timeout)
 	})
-	return result, nil, nil
+	return result, nil, snapshot, nil
 }
 
 func probeStorageDetails(ctx context.Context, storage driver.WithDetails, snapshot storageDetailsSnapshot, timeout time.Duration) (ret *model.StorageDetails, err error) {
@@ -178,16 +264,16 @@ func probeStorageDetails(ctx context.Context, storage driver.WithDetails, snapsh
 			log.Debugf("discarding stale storage details for %s: generation %d was superseded by %d", snapshot.key, snapshot.generation, state.generation)
 			return
 		}
+		now := time.Now().Unix()
 		state.refreshing = false
+		state.updated = now
 		if err == nil {
 			if snapshot.cache {
 				Cache.detailCache.SetWithTTL(snapshot.key, ret, snapshot.ttl)
 			}
-			state.lastDone = time.Now().Unix()
-			if len(detailsStates) > 256 {
-				cleanExpiredLastDoneTimesLocked(state.lastDone)
-			}
+			state.lastDone = now
 		}
+		maybePruneStorageDetailsStatesLocked(now)
 	}()
 	ret, err = storage.GetDetails(probeCtx)
 	if err != nil {
@@ -203,16 +289,20 @@ func GetStorageDetails(ctx context.Context, storage driver.Driver, refresh ...bo
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	cooldownSec := GetSettingInt(conf.StorageDetailsCooldownSeconds, 0)
-	timeout := time.Duration(GetSettingInt(conf.StorageDetailsTimeoutSeconds, 15)) * time.Second
-	result, cached, err := prepareStorageDetails(ctx, storage, utils.IsBool(refresh...), cooldownSec, timeout)
+	cooldownSec, timeout := storageDetailsSettings()
+	result, cached, snapshot, err := prepareStorageDetailsFlight(ctx, storage, utils.IsBool(refresh...), cooldownSec, timeout)
 	if err != nil || result == nil {
 		return cached, err
 	}
+	deadline := time.NewTimer(timeout + detailsWaitGrace)
+	defer deadline.Stop()
 	select {
 	case ret := <-result:
 		return ret.Val, ret.Err
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	case <-deadline.C:
+		abandonStorageDetailsFlight(snapshot)
+		return nil, errors.WithMessagef(context.DeadlineExceeded, "storage details probe for %s did not return", snapshot.key)
 	}
 }

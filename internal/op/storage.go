@@ -218,7 +218,11 @@ func DisableStorage(ctx context.Context, id uint) error {
 	if err != nil {
 		return err
 	}
-	defer finishStorageDetailsChange(storageDriver, change, false)
+	// Only a completed disable retires the driver. If Drop or the database
+	// update fails the storage stays mounted and enabled, so its in-memory
+	// status must not be flipped to DISABLED.
+	retired := false
+	defer func() { finishStorageDetailsChange(storageDriver, change, !retired) }()
 	// drop the storage in the driver
 	if err := storageDriver.Drop(ctx); err != nil {
 		return errors.Wrap(err, "failed drop storage")
@@ -231,6 +235,7 @@ func DisableStorage(ctx context.Context, id uint) error {
 		return errors.WithMessage(err, "failed update storage in db")
 	}
 	storagesMap.Delete(storage.MountPath)
+	retired = true
 	go callStorageHooks("del", storageDriver)
 	return nil
 }

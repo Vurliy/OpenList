@@ -471,16 +471,111 @@ func TestGetStorageDetailsNoCache(t *testing.T) {
 	}
 }
 
-func TestGetStorageDetailsExpiredCooldownPreservesGeneration(t *testing.T) {
+func TestPruneStorageDetailsStatesKeepsActiveEntries(t *testing.T) {
 	d := newDetailsTestDriver(t, 1000)
+	idle := "/details-test/prune-idle"
 	detailsLock.Lock()
-	state := storageDetailsStateLocked(d.MountPath)
-	state.generation, state.lastDone, state.refreshing = 10, 1, true
-	cleanExpiredLastDoneTimesLocked(time.Now().Unix())
-	generation, refreshing, lastDone := state.generation, state.refreshing, state.lastDone
+	defer detailsLock.Unlock()
+	now := time.Now().Unix()
+	stale := now - detailsStateIdleTTL - 1
+	active := storageDetailsStateLocked(d.MountPath)
+	active.refreshing, active.updated = true, stale
+	storageDetailsStateLocked(idle).updated = stale
+	pruneStorageDetailsStatesLocked(now)
+	if _, ok := detailsStates[idle]; ok {
+		t.Fatal("idle state was not pruned")
+	}
+	if detailsStates[d.MountPath] != active {
+		t.Fatal("refreshing state was pruned")
+	}
+}
+
+func TestPrunedStateDoesNotAcceptLateProbe(t *testing.T) {
+	d := newDetailsTestDriver(t, 1000)
+	entered, release := blockDetailsTestProbe(t, d, 2000)
+	late := admitDetailsTestCall(t, d, true, time.Second)
+	awaitDetailsTestEntered(t, entered)
+	detailsLock.Lock()
+	delete(detailsStates, d.MountPath)
+	recreated := storageDetailsStateLocked(d.MountPath).generation
 	detailsLock.Unlock()
-	if generation != 10 || !refreshing || lastDone != 0 {
-		t.Fatal("cooldown cleanup reset version or active refresh")
+	release()
+	awaitDetailsTestFlight(t, late)
+	if _, exists := Cache.GetStorageDetails(d); exists {
+		t.Fatalf("late probe of pruned state (new generation %d) was cached", recreated)
+	}
+}
+
+func TestStorageDetailsSettingsAreClamped(t *testing.T) {
+	cases := []struct {
+		cooldown, timeout string
+		wantCooldown      int
+		wantTimeout       time.Duration
+	}{
+		{"-5", "0", 0, defaultStorageDetailsTimeoutSec * time.Second},
+		{"10", "-1", 10, defaultStorageDetailsTimeoutSec * time.Second},
+		{"999999", "999999", maxStorageDetailsCooldownSec, maxStorageDetailsTimeoutSec * time.Second},
+		{"bad", "bad", 0, defaultStorageDetailsTimeoutSec * time.Second},
+	}
+	for _, c := range cases {
+		setDetailsTestSetting(t, conf.StorageDetailsCooldownSeconds, c.cooldown)
+		setDetailsTestSetting(t, conf.StorageDetailsTimeoutSeconds, c.timeout)
+		cooldown, timeout := storageDetailsSettings()
+		if cooldown != c.wantCooldown || timeout != c.wantTimeout {
+			t.Fatalf("%s/%s: got %d/%s", c.cooldown, c.timeout, cooldown, timeout)
+		}
+	}
+}
+
+func TestGetStorageDetailsAbandonsProbeIgnoringDeadline(t *testing.T) {
+	d := newDetailsTestDriver(t, 1000)
+	setDetailsTestSetting(t, conf.StorageDetailsTimeoutSeconds, "1")
+	hang := make(chan struct{})
+	t.Cleanup(func() { close(hang) })
+	var hung atomic.Bool
+	hung.Store(true)
+	d.probe = func(context.Context) (*model.StorageDetails, error) {
+		if hung.Load() {
+			<-hang // ignores ctx on purpose
+			return detailsTestValue(1000), nil
+		}
+		return detailsTestValue(3000), nil
+	}
+	start := time.Now()
+	if _, err := GetStorageDetails(context.Background(), d, true); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("hung probe: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second+detailsWaitGrace+time.Second {
+		t.Fatalf("caller waited %s", elapsed)
+	}
+	hung.Store(false)
+	val, err := GetStorageDetails(context.Background(), d, true)
+	if err != nil || val.TotalSpace != 3000 {
+		t.Fatalf("refresh stayed stuck behind hung probe: %v, %v", val, err)
+	}
+}
+
+func TestDisableStorageFailureKeepsDriverWorking(t *testing.T) {
+	d := newLifecycleDetailsTestDriver(t)
+	d.dropHook = func(context.Context) error { return errors.New("drop failed") }
+	if err := DisableStorage(context.Background(), d.ID); err == nil {
+		t.Fatal("expected drop failure")
+	}
+	if d.GetStorage().Status != WORK {
+		t.Fatalf("failed disable changed status to %q", d.GetStorage().Status)
+	}
+	if registered, ok := storagesMap.Load(d.MountPath); !ok || registered != d {
+		t.Fatal("failed disable unmounted the driver")
+	}
+	if val, err := GetStorageDetails(context.Background(), d); err != nil || val.TotalSpace != 1000 {
+		t.Fatalf("details after failed disable: %v, %v", val, err)
+	}
+	d.dropHook = nil
+	if err := DisableStorage(context.Background(), d.ID); err != nil {
+		t.Fatal(err)
+	}
+	if d.GetStorage().Status != DISABLED {
+		t.Fatalf("successful disable left status %q", d.GetStorage().Status)
 	}
 }
 
