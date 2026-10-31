@@ -6,7 +6,6 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -96,25 +95,12 @@ func getCurrentGoroutineStack() string {
 
 // initStorage initialize the driver and store to storagesMap
 func initStorage(ctx context.Context, storage model.Storage, storageDriver driver.Driver) (err error) {
-	change, err := beginStorageDetailsChange(storageDriver, storage.MountPath)
-	if err != nil {
-		return err
-	}
-	ready := false
-	defer func() { finishStorageDetailsChange(storageDriver, change, ready) }()
-	err = initializeStorage(ctx, storage, storageDriver)
-	ready = err == nil
-	return err
-}
-
-// initializeStorage is called with capacity admission suspended by its caller.
-func initializeStorage(ctx context.Context, storage model.Storage, storageDriver driver.Driver) (err error) {
+	defer beginStorageDetailsChange(storage.MountPath)()
 	storageDriver.SetStorage(storage)
 	driverStorage := storageDriver.GetStorage()
 	defer func() {
-		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("panic initializing storage: %v", recovered)
-			errInfo := fmt.Sprintf("[panic] err: %v\nstack: %s\n", recovered, getCurrentGoroutineStack())
+		if err := recover(); err != nil {
+			errInfo := fmt.Sprintf("[panic] err: %v\nstack: %s\n", err, getCurrentGoroutineStack())
 			log.Errorf("panic init storage: %s", errInfo)
 			driverStorage.SetStatus(errInfo)
 			MustSaveDriverStorage(storageDriver)
@@ -214,40 +200,21 @@ func DisableStorage(ctx context.Context, id uint) error {
 	if err != nil {
 		return errors.WithMessage(err, "failed get storage driver")
 	}
-	change, err := beginStorageDetailsChange(storageDriver, storage.MountPath)
-	if err != nil {
-		return err
-	}
-	defer finishStorageDetailsChange(storageDriver, change, false)
+	defer beginStorageDetailsChange(storage.MountPath)()
 	// drop the storage in the driver
 	if err := storageDriver.Drop(ctx); err != nil {
-		err = errors.Wrap(err, "failed drop storage")
-		// The storage stays mounted and enabled, so report the failure
-		// instead of letting it look DISABLED.
-		markStorageChangeFailed(storageDriver, err)
-		return err
+		return errors.Wrap(err, "failed drop storage")
 	}
 	// delete the storage in the memory
 	storage.Disabled = true
 	storage.SetStatus(DISABLED)
 	err = db.UpdateStorage(storage)
 	if err != nil {
-		err = errors.WithMessage(err, "failed update storage in db")
-		markStorageChangeFailed(storageDriver, err)
-		return err
+		return errors.WithMessage(err, "failed update storage in db")
 	}
 	storagesMap.Delete(storage.MountPath)
-	storageDriver.GetStorage().SetStatus(DISABLED)
 	go callStorageHooks("del", storageDriver)
 	return nil
-}
-
-// markStorageChangeFailed records a failed lifecycle change as the driver's
-// status, so the storage reads as failed rather than WORK or DISABLED.
-func markStorageChangeFailed(storageDriver driver.Driver, err error) {
-	if meta := storageDriver.GetStorage(); meta != nil {
-		meta.SetStatus(err.Error())
-	}
 }
 
 // UpdateStorage update storage
@@ -263,46 +230,31 @@ func UpdateStorage(ctx context.Context, storage model.Storage) error {
 	}
 	storage.Modified = time.Now()
 	storage.MountPath = utils.FixAndCleanPath(storage.MountPath)
+	err = db.UpdateStorage(&storage)
+	if err != nil {
+		return errors.WithMessage(err, "failed update storage in database")
+	}
 	if storage.Disabled {
-		return errors.WithMessage(db.UpdateStorage(&storage), "failed update storage in database")
+		return nil
 	}
 	storageDriver, err := GetStorageByMountPath(oldStorage.MountPath)
 	if err != nil {
 		return errors.WithMessage(err, "failed get storage driver")
 	}
-	change, err := beginStorageDetailsChange(storageDriver, oldStorage.MountPath, storage.MountPath)
-	if err != nil {
-		return err
-	}
-	ready := false
-	defer func() { finishStorageDetailsChange(storageDriver, change, ready) }()
-	err = db.UpdateStorage(&storage)
-	if err != nil {
-		ready = true
-		return errors.WithMessage(err, "failed update storage in database")
-	}
 	// Storage settings may change which objects are exposed at the same mount
 	// path, so cached entries must be discarded before reinitializing the driver.
 	Cache.DeleteDirectoryTree(storageDriver, "/")
-	err = storageDriver.Drop(ctx)
-	if err != nil {
-		err = errors.Wrapf(err, "failed drop storage")
-		// The driver still holds the old settings at the old mount path. Keep
-		// it registered there, restore the old row so a retry starts from a
-		// consistent state, and report the failure as its status.
-		if rollbackErr := db.UpdateStorage(oldStorage); rollbackErr != nil {
-			log.Errorf("failed to roll back storage %d after drop failure: %+v", oldStorage.ID, rollbackErr)
-		}
-		markStorageChangeFailed(storageDriver, err)
-		return err
-	}
+	defer beginStorageDetailsChange(oldStorage.MountPath, storage.MountPath)()
 	if oldStorage.MountPath != storage.MountPath {
-		// mount path renamed, the driver is re-registered by initializeStorage
+		// mount path renamed, need to drop the storage
 		storagesMap.Delete(oldStorage.MountPath)
 	}
+	err = storageDriver.Drop(ctx)
+	if err != nil {
+		return errors.Wrapf(err, "failed drop storage")
+	}
 
-	err = initializeStorage(ctx, storage, storageDriver)
-	ready = err == nil
+	err = initStorage(ctx, storage, storageDriver)
 	go callStorageHooks("update", storageDriver)
 	log.Debugf("storage %+v is update", storageDriver)
 	return err
@@ -319,11 +271,7 @@ func DeleteStorageById(ctx context.Context, id uint) error {
 		if err != nil {
 			return errors.WithMessage(err, "failed get storage driver")
 		}
-		change, err := beginStorageDetailsChange(storageDriver, storage.MountPath)
-		if err != nil {
-			return err
-		}
-		defer finishStorageDetailsChange(storageDriver, change, false)
+		defer beginStorageDetailsChange(storage.MountPath)()
 		// drop the storage in the driver
 		if err := storageDriver.Drop(ctx); err != nil {
 			dropErr = errors.Wrapf(err, "failed drop storage")
@@ -399,16 +347,6 @@ func GetStorageVirtualFilesByPath(prefix string) []model.Obj {
 	return getStorageVirtualFilesByPath(prefix, nil, "")
 }
 
-// GetSettingInt retrieves an integer setting value by key, returning defaultValue if absent or invalid.
-func GetSettingInt(key string, defaultValue int) int {
-	if item, err := GetSettingItemByKey(key); err == nil && item != nil {
-		if val, err := strconv.Atoi(item.Value); err == nil {
-			return val
-		}
-	}
-	return defaultValue
-}
-
 func GetStorageVirtualFilesWithDetailsByPath(ctx context.Context, prefix string, hideDetails, refresh bool, filterByName string) []model.Obj {
 	if hideDetails {
 		return getStorageVirtualFilesByPath(prefix, nil, filterByName)
@@ -423,12 +361,6 @@ func GetStorageVirtualFilesWithDetailsByPath(ctx context.Context, prefix string,
 		}
 		resultChan := make(chan *model.StorageDetails, 1)
 		go func(dri driver.Driver) {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Errorf("panic recovered in storage details probe for %s: %v", dri.GetStorage().MountPath, r)
-					resultChan <- nil
-				}
-			}()
 			details, err := GetStorageDetails(ctx, dri, refresh)
 			if err != nil {
 				if !errors.Is(err, errs.NotImplement) && !errors.Is(err, errs.StorageNotInit) {
